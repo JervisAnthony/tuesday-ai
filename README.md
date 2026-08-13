@@ -37,6 +37,19 @@ python -m ruff check .
 python -m pytest --cov=tuesday
 ```
 
+## Configuration
+
+TUESDAY reads its foundational runtime settings from environment variables:
+
+- `TUESDAY_ENV` selects `development`, `testing`, or `production`. Its default
+  is `development`.
+- `TUESDAY_DEBUG` optionally overrides the environment-derived debug setting.
+  Accepted true values are `1`, `true`, `yes`, and `on`; accepted false values
+  are `0`, `false`, `no`, and `off`. Values are case-insensitive.
+
+Debug mode defaults to enabled in development and disabled in testing and
+production. Invalid environment or debug values produce a configuration error.
+
 ## License
 
 TUESDAY is licensed under the MIT License. See [LICENSE](LICENSE).
