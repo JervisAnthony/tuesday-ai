@@ -1,6 +1,7 @@
 """Public contracts for TUESDAY agents."""
 
 from tuesday.agents.base import BaseAgent
+from tuesday.agents.conversational import ConversationalAgent
 from tuesday.agents.registry import (
     AgentNotFoundError,
     AgentRegistrationError,
@@ -12,4 +13,5 @@ __all__ = [
     "AgentRegistrationError",
     "AgentRegistry",
     "BaseAgent",
+    "ConversationalAgent",
 ]
