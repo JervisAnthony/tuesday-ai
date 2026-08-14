@@ -2,10 +2,18 @@
 
 **Task-Unifying Engine for Smart Decisions, Actions & You**
 
+<p align="center">
+  <img
+    src="docs/assets/tuesday-readme.png"
+    alt="TUESDAY — Task-Unifying Engine for Smart Decisions, Actions & You"
+    width="900"
+  />
+</p>
+
 TUESDAY is intended to become a modular, context-aware personal AI operating
-system. The project is currently at its foundation stage: it provides packaging,
-development tooling, and an importable Python package, but no application
-capabilities yet.
+system. It currently includes a deterministic conversational baseline agent used
+to validate the production agent execution path. LLM-backed conversational
+behavior will be introduced later.
 
 Over time, TUESDAY aims to:
 
