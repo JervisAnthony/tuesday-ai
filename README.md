@@ -23,6 +23,33 @@ Over time, TUESDAY aims to:
 - perform user-authorised actions; and
 - integrate with external tools and services.
 
+## Default application composition
+
+TUESDAY now has a deterministic end-to-end interaction path that composes its
+router, agent registry, conversational baseline agent, and orchestrator. The
+default composition supports the explicit `/chat` and `/conversation`
+directives; it does not infer intent from unrestricted text.
+
+```python
+import asyncio
+from uuid import uuid4
+
+from tuesday.composition import create_default_orchestrator
+from tuesday.domain import ConversationContext, TuesdayRequest
+
+conversation_id = uuid4()
+request = TuesdayRequest(
+    content="/chat Hello",
+    conversation_id=conversation_id,
+)
+context = ConversationContext(conversation_id=conversation_id)
+
+orchestrator = create_default_orchestrator()
+response = asyncio.run(orchestrator.handle(request, context))
+
+print(response.content)  # TUESDAY received: /chat Hello
+```
+
 ## Development setup
 
 Python 3.13 is recommended for local development. The package supports Python
