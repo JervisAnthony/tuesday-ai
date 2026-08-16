@@ -76,6 +76,22 @@ python -m ruff check .
 python -m pytest --cov=tuesday
 ```
 
+## Model runtime configuration
+
+TUESDAY includes optional runtime configuration contracts for future
+language-model providers, but the current default composition performs no LLM
+requests. No provider or model is selected by default. Configuration uses:
+
+- `TUESDAY_MODEL_PROVIDER`
+- `TUESDAY_MODEL_NAME`
+- `TUESDAY_MODEL_API_KEY`
+- `TUESDAY_MODEL_TIMEOUT_SECONDS`
+- `TUESDAY_MODEL_TEMPERATURE`
+
+Provider and model name must be configured together. Credentials should be
+supplied through environment configuration and are excluded from settings
+representations.
+
 ## Configuration
 
 TUESDAY reads its foundational runtime settings from environment variables:
