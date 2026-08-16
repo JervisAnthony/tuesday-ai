@@ -93,9 +93,21 @@ supplied through environment configuration and are excluded from settings
 representations.
 
 Provider-neutral language-model message, request, response, and asynchronous
-provider contracts are also available. No concrete provider adapter is included
-yet, and the default application performs no model calls; provider integration
-remains separate from the core contracts.
+provider contracts are also available. TUESDAY's first concrete adapter uses the
+official OpenAI SDK and implements those provider-neutral contracts, but it is
+not wired into the default application. `/chat` remains deterministic, and
+configuring model settings alone performs no provider call; model-backed
+conversation is forthcoming.
+
+The OpenAI adapter uses the existing TUESDAY-owned runtime variables:
+
+```text
+TUESDAY_MODEL_PROVIDER=openai
+TUESDAY_MODEL_NAME=<model-name>
+TUESDAY_MODEL_API_KEY=<credential>
+TUESDAY_MODEL_TIMEOUT_SECONDS=30
+TUESDAY_MODEL_TEMPERATURE=0.2
+```
 
 ## Configuration
 
