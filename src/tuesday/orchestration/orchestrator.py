@@ -2,6 +2,7 @@
 
 from tuesday.agents import AgentRegistry
 from tuesday.domain import ConversationContext, TuesdayRequest, TuesdayResponse
+from tuesday.preparation import BaseRequestPreparer
 from tuesday.routing import BaseRouter
 
 __all__ = ["InvalidAgentResponseError", "TuesdayOrchestrator"]
@@ -14,9 +15,15 @@ class InvalidAgentResponseError(ValueError):
 class TuesdayOrchestrator:
     """Coordinate one routed agent execution for a TUESDAY interaction."""
 
-    def __init__(self, router: BaseRouter, registry: AgentRegistry) -> None:
+    def __init__(
+        self,
+        router: BaseRouter,
+        registry: AgentRegistry,
+        request_preparer: BaseRequestPreparer | None = None,
+    ) -> None:
         self._router = router
         self._registry = registry
+        self._request_preparer = request_preparer
 
     async def handle(
         self,
@@ -27,7 +34,11 @@ class TuesdayOrchestrator:
         self._validate_context(request, context)
         decision = await self._router.route(request, context, self._registry)
         agent = self._registry.get(decision.agent_name)
-        response = await agent.handle(request, context)
+        execution_request = request
+        if self._request_preparer is not None:
+            prepared_request = self._request_preparer.prepare(request)
+            execution_request = prepared_request.to_request()
+        response = await agent.handle(execution_request, context)
         self._validate_response(request, response)
         return response
 

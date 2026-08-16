@@ -12,6 +12,11 @@ from tuesday.orchestration import (
     InvalidAgentResponseError,
     TuesdayOrchestrator,
 )
+from tuesday.preparation import (
+    BaseRequestPreparer,
+    PreparedRequest,
+    RequestPreparationError,
+)
 from tuesday.routing import BaseRouter, RoutingDecision
 
 
@@ -22,9 +27,11 @@ class TrackingRouter(BaseRouter):
         self,
         agent_name: str = "selected",
         error: Exception | None = None,
+        events: list[str] | None = None,
     ) -> None:
         self.agent_name = agent_name
         self.error = error
+        self.events = events
         self.route_calls = 0
         self.received_request: TuesdayRequest | None = None
         self.received_context: ConversationContext | None = None
@@ -37,6 +44,8 @@ class TrackingRouter(BaseRouter):
         registry: AgentRegistry,
     ) -> RoutingDecision:
         self.route_calls += 1
+        if self.events is not None:
+            self.events.append("route")
         self.received_request = request
         self.received_context = context
         self.received_registry = registry
@@ -58,11 +67,13 @@ class TrackingAgent(BaseAgent):
         conversation_id: UUID | None = None,
         request_id: UUID | None = None,
         error: Exception | None = None,
+        events: list[str] | None = None,
     ) -> None:
         self._name = name
         self._conversation_id = conversation_id
         self._request_id = request_id
         self.error = error
+        self.events = events
         self.handle_calls = 0
         self.received_request: TuesdayRequest | None = None
         self.received_context: ConversationContext | None = None
@@ -82,6 +93,8 @@ class TrackingAgent(BaseAgent):
         context: ConversationContext,
     ) -> TuesdayResponse:
         self.handle_calls += 1
+        if self.events is not None:
+            self.events.append("agent")
         self.received_request = request
         self.received_context = context
         if self.error is not None:
@@ -100,6 +113,45 @@ class TrackingAgent(BaseAgent):
             ),
         )
         return self.returned_response
+
+
+class TrackingPreparer(BaseRequestPreparer):
+    """Test preparer that records calls and returns configured content."""
+
+    def __init__(
+        self,
+        content: str = "prepared",
+        error: Exception | None = None,
+        events: list[str] | None = None,
+    ) -> None:
+        self.content = content
+        self.error = error
+        self.events = events
+        self.prepare_calls = 0
+        self.received_requests: list[TuesdayRequest] = []
+
+    def prepare(self, request: TuesdayRequest) -> PreparedRequest:
+        self.prepare_calls += 1
+        self.received_requests.append(request)
+        if self.events is not None:
+            self.events.append("prepare")
+        if self.error is not None:
+            raise self.error
+        return PreparedRequest(source_request=request, content=self.content)
+
+
+class MismatchedCorrelationPreparedView:
+    """Nonconforming test view used to verify response validation authority."""
+
+    def to_request(self) -> TuesdayRequest:
+        return TuesdayRequest(content="prepared")
+
+
+class MismatchedCorrelationPreparer(BaseRequestPreparer):
+    """Test preparer that deliberately violates the prepared-view contract."""
+
+    def prepare(self, request: TuesdayRequest) -> PreparedRequest:
+        return MismatchedCorrelationPreparedView()  # type: ignore[return-value]
 
 
 def matching_interaction(content: str = "Hello") -> tuple[
@@ -136,6 +188,7 @@ def test_orchestrator_accepts_router_and_registry_dependencies() -> None:
 
     assert orchestrator._router is router
     assert orchestrator._registry is registry
+    assert orchestrator._request_preparer is None
 
 
 def test_handle_is_asynchronous() -> None:
@@ -161,7 +214,12 @@ def test_context_mismatch_fails_before_routing_without_mutation() -> None:
     original_request = request
     original_context = context
     router = TrackingRouter()
-    orchestrator = TuesdayOrchestrator(router, AgentRegistry())
+    preparer = TrackingPreparer()
+    orchestrator = TuesdayOrchestrator(
+        router,
+        AgentRegistry(),
+        request_preparer=preparer,
+    )
 
     with pytest.raises(
         ValueError,
@@ -170,6 +228,7 @@ def test_context_mismatch_fails_before_routing_without_mutation() -> None:
         run_handle(orchestrator, request, context)
 
     assert router.route_calls == 0
+    assert preparer.prepare_calls == 0
     assert request == original_request
     assert context == original_context
 
@@ -248,12 +307,18 @@ def test_unregistered_decision_propagates_agent_not_found_without_execution() ->
     request, context = matching_interaction()
     registered = TrackingAgent("registered")
     registry = registry_with(registered)
-    orchestrator = TuesdayOrchestrator(TrackingRouter("missing"), registry)
+    preparer = TrackingPreparer()
+    orchestrator = TuesdayOrchestrator(
+        TrackingRouter("missing"),
+        registry,
+        request_preparer=preparer,
+    )
 
     with pytest.raises(AgentNotFoundError, match="missing"):
         run_handle(orchestrator, request, context)
 
     assert registered.handle_calls == 0
+    assert preparer.prepare_calls == 0
 
 
 def test_wrong_response_conversation_id_is_rejected_without_repair() -> None:
@@ -351,7 +416,11 @@ def test_orchestrator_retains_only_composition_dependencies() -> None:
 
     run_handle(orchestrator, request, context)
 
-    assert vars(orchestrator) == {"_router": router, "_registry": registry}
+    assert vars(orchestrator) == {
+        "_router": router,
+        "_registry": registry,
+        "_request_preparer": None,
+    }
 
 
 def test_sequential_interactions_do_not_leak_request_state() -> None:
@@ -392,14 +461,121 @@ def test_router_exception_propagates_without_agent_execution() -> None:
     error = RuntimeError("router failed")
     router = TrackingRouter(error=error)
     agent = TrackingAgent("selected")
+    preparer = TrackingPreparer()
 
     with pytest.raises(RuntimeError, match="router failed") as raised:
         run_handle(
-            TuesdayOrchestrator(router, registry_with(agent)),
+            TuesdayOrchestrator(
+                router,
+                registry_with(agent),
+                request_preparer=preparer,
+            ),
             request,
             context,
         )
 
     assert raised.value is error
     assert router.route_calls == 1
+    assert preparer.prepare_calls == 0
     assert agent.handle_calls == 0
+
+
+def test_configured_preparation_runs_after_routing_and_before_agent() -> None:
+    events: list[str] = []
+    request, context = matching_interaction("/chat Hello")
+    original_request = request
+    original_context = context
+    router = TrackingRouter(events=events)
+    preparer = TrackingPreparer(content="Hello", events=events)
+    agent = TrackingAgent("selected", events=events)
+    orchestrator = TuesdayOrchestrator(
+        router,
+        registry_with(agent),
+        request_preparer=preparer,
+    )
+
+    run_handle(orchestrator, request, context)
+
+    assert events == ["route", "prepare", "agent"]
+    assert router.received_request is request
+    assert preparer.received_requests == [request]
+    assert preparer.received_requests[0] is request
+    assert preparer.prepare_calls == 1
+    assert agent.handle_calls == 1
+    assert agent.received_request is not request
+    assert agent.received_request.content == "Hello"
+    assert agent.received_request.conversation_id == request.conversation_id
+    assert agent.received_request.request_id == request.request_id
+    assert agent.received_context is context
+    assert request is original_request
+    assert request.content == "/chat Hello"
+    assert context is original_context
+
+
+def test_preparation_error_propagates_without_agent_execution() -> None:
+    request, context = matching_interaction("/chat")
+    error = RequestPreparationError("missing content")
+    router = TrackingRouter()
+    preparer = TrackingPreparer(error=error)
+    agent = TrackingAgent("selected")
+
+    with pytest.raises(RequestPreparationError, match="missing content") as raised:
+        run_handle(
+            TuesdayOrchestrator(
+                router,
+                registry_with(agent),
+                request_preparer=preparer,
+            ),
+            request,
+            context,
+        )
+
+    assert raised.value is error
+    assert router.route_calls == 1
+    assert preparer.prepare_calls == 1
+    assert agent.handle_calls == 0
+
+
+def test_response_is_validated_against_original_request() -> None:
+    request, context = matching_interaction("/chat Hello")
+    agent = TrackingAgent("selected")
+
+    with pytest.raises(
+        InvalidAgentResponseError,
+        match="conversation_id does not match the request",
+    ):
+        run_handle(
+            TuesdayOrchestrator(
+                TrackingRouter(),
+                registry_with(agent),
+                request_preparer=MismatchedCorrelationPreparer(),
+            ),
+            request,
+            context,
+        )
+
+    assert agent.handle_calls == 1
+    assert agent.received_request is not None
+    assert agent.received_request.conversation_id != request.conversation_id
+
+
+def test_sequential_prepared_interactions_preserve_independent_correlation() -> None:
+    preparer = TrackingPreparer()
+    agent = TrackingAgent("selected")
+    orchestrator = TuesdayOrchestrator(
+        TrackingRouter(),
+        registry_with(agent),
+        request_preparer=preparer,
+    )
+    first_request, first_context = matching_interaction("/chat First")
+    second_request, second_context = matching_interaction("/chat Second")
+
+    first_response = run_handle(orchestrator, first_request, first_context)
+    second_response = run_handle(orchestrator, second_request, second_context)
+
+    assert preparer.received_requests == [first_request, second_request]
+    assert preparer.prepare_calls == 2
+    assert first_response.request_id == first_request.request_id
+    assert first_response.conversation_id == first_request.conversation_id
+    assert second_response.request_id == second_request.request_id
+    assert second_response.conversation_id == second_request.conversation_id
