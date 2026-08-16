@@ -92,6 +92,11 @@ Provider and model name must be configured together. Credentials should be
 supplied through environment configuration and are excluded from settings
 representations.
 
+Provider-neutral language-model message, request, response, and asynchronous
+provider contracts are also available. No concrete provider adapter is included
+yet, and the default application performs no model calls; provider integration
+remains separate from the core contracts.
+
 ## Configuration
 
 TUESDAY reads its foundational runtime settings from environment variables:
