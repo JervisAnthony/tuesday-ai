@@ -15,6 +15,10 @@ from tuesday.domain import (
     TuesdayResponse,
 )
 from tuesday.orchestration import TuesdayOrchestrator
+from tuesday.preparation import (
+    DirectiveRequestPreparer,
+    RequestPreparationError,
+)
 from tuesday.routing import DeterministicRouter, NoRouteFoundError
 
 
@@ -39,6 +43,10 @@ def test_factory_returns_orchestrator_with_real_default_components() -> None:
     assert isinstance(orchestrator, TuesdayOrchestrator)
     assert isinstance(orchestrator._router, DeterministicRouter)
     assert isinstance(orchestrator._registry, AgentRegistry)
+    assert isinstance(
+        orchestrator._request_preparer,
+        DirectiveRequestPreparer,
+    )
     assert orchestrator._registry.names == ("conversation",)
     assert isinstance(
         orchestrator._registry.get("conversation"),
@@ -58,11 +66,8 @@ def test_default_composition_has_exact_route_policy() -> None:
 @pytest.mark.parametrize(
     ("content", "expected_content"),
     [
-        ("/chat Hello", "TUESDAY received: /chat Hello"),
-        (
-            "/conversation Hello",
-            "TUESDAY received: /conversation Hello",
-        ),
+        ("/chat Hello", "TUESDAY received: Hello"),
+        ("/conversation Hello", "TUESDAY received: Hello"),
     ],
 )
 def test_default_directives_complete_end_to_end_interaction(
@@ -93,7 +98,7 @@ def test_one_prior_message_is_reflected_with_singular_wording() -> None:
     )
 
     assert response.content == (
-        "TUESDAY received: /chat Hello again (1 prior message in context)"
+        "TUESDAY received: Hello again (1 prior message in context)"
     )
 
 
@@ -118,7 +123,7 @@ def test_multiple_prior_messages_use_plural_without_leaking_content() -> None:
     )
 
     assert response.content == (
-        "TUESDAY received: /chat Hello again (2 prior messages in context)"
+        "TUESDAY received: Hello again (2 prior messages in context)"
     )
     assert first_prior_content not in response.content
     assert second_prior_content not in response.content
@@ -168,6 +173,17 @@ def test_route_selection_remains_case_sensitive() -> None:
         run_interaction(create_default_orchestrator(), "/Chat Hello")
 
 
+@pytest.mark.parametrize("content", ["/chat", "/chat   "])
+def test_known_route_without_content_fails_during_preparation(
+    content: str,
+) -> None:
+    with pytest.raises(
+        RequestPreparationError,
+        match="must include content after the routing directive",
+    ):
+        run_interaction(create_default_orchestrator(), content)
+
+
 def test_request_context_mismatch_fails() -> None:
     request = TuesdayRequest(content="/chat Hello")
     context = ConversationContext()
@@ -193,6 +209,9 @@ def test_factory_calls_create_independent_runtime_graphs() -> None:
     assert first is not second
     assert first._registry is not second._registry
     assert first._router is not second._router
+    assert first._request_preparer is not second._request_preparer
+    assert isinstance(first._request_preparer, DirectiveRequestPreparer)
+    assert isinstance(second._request_preparer, DirectiveRequestPreparer)
     assert first._registry.get("conversation") is not second._registry.get(
         "conversation"
     )
@@ -212,10 +231,8 @@ def test_sequential_interactions_remain_independent_and_correlated() -> None:
         "/conversation Second",
     )
 
-    assert first_response.content == "TUESDAY received: /chat First"
-    assert second_response.content == (
-        "TUESDAY received: /conversation Second"
-    )
+    assert first_response.content == "TUESDAY received: First"
+    assert second_response.content == "TUESDAY received: Second"
     assert first_response.conversation_id == first_request.conversation_id
     assert first_response.request_id == first_request.request_id
     assert second_response.conversation_id == second_request.conversation_id

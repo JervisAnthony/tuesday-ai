@@ -47,8 +47,12 @@ context = ConversationContext(conversation_id=conversation_id)
 orchestrator = create_default_orchestrator()
 response = asyncio.run(orchestrator.handle(request, context))
 
-print(response.content)  # TUESDAY received: /chat Hello
+print(response.content)  # TUESDAY received: Hello
 ```
+
+The `/chat` directive is used for deterministic routing and removed before the
+conversational agent receives the user-facing content. The original
+`TuesdayRequest` remains unchanged.
 
 ## Development setup
 
