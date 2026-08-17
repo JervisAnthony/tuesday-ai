@@ -109,6 +109,20 @@ TUESDAY_MODEL_TIMEOUT_SECONDS=30
 TUESDAY_MODEL_TEMPERATURE=0.2
 ```
 
+## Conversational prompt rendering
+
+TUESDAY includes a provider-neutral `ConversationalPromptRenderer` that converts
+an immutable `TuesdayRequest` and its prior `ConversationContext` into a
+`LanguageModelRequest`. Rendering prepends TUESDAY's conversational system
+instruction, preserves prior history in order, and appends the current request
+as the final user message.
+
+The renderer does not call OpenAI or any other provider, does not include
+conversation/request identifiers in model input, and does not mutate the source
+request or context. It is intentionally separate from both provider execution
+and the deterministic `ConversationalAgent`; model-backed conversational
+behavior remains a later composition step.
+
 ## Configuration
 
 TUESDAY reads its foundational runtime settings from environment variables:
