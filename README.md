@@ -71,10 +71,21 @@ pip install -e ".[dev]"
 Run the validation suite:
 
 ```powershell
-python -m pytest
+python -m pip check
 python -m ruff check .
-python -m pytest --cov=tuesday
+python -m pytest --cov=tuesday --cov-report=term-missing --cov-fail-under=100
 ```
+
+## Continuous integration
+
+GitHub Actions validates pull requests targeting `Dev` or `production` and
+pushes to those branches across Python 3.11, 3.12, and 3.13. CI performs an
+editable development install, dependency consistency checks, Ruff linting, and
+the full pytest suite with a 100% production-code coverage gate.
+
+The CI workflow uses read-only repository permissions, does not require secrets,
+and cancels superseded runs for the same ref. Contributor branch, validation,
+and pull-request expectations are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Model runtime configuration
 
