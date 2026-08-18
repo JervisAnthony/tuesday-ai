@@ -53,7 +53,9 @@ class InMemoryConversationRepository(BaseConversationRepository):
     @staticmethod
     def _validate_messages(messages: tuple[ConversationMessage, ...]) -> None:
         if not isinstance(messages, tuple):
-            raise TypeError("messages must be a tuple of ConversationMessage instances.")
+            raise TypeError(
+                "messages must be a tuple of ConversationMessage instances."
+            )
         if not messages:
             raise ValueError("messages must contain at least one ConversationMessage.")
         if not all(isinstance(message, ConversationMessage) for message in messages):
