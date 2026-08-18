@@ -11,10 +11,9 @@
 </p>
 
 TUESDAY is intended to become a modular, context-aware personal AI operating
-system. It includes both a deterministic conversational baseline agent and a
-provider-neutral model-backed conversational agent. The default application
-composition remains deterministic until model-backed composition is introduced
-deliberately.
+system. It includes a deterministic default conversational runtime and an
+explicit provider-neutral model-backed composition path. Model execution remains
+opt-in; the default application does not contact a language-model provider.
 
 Over time, TUESDAY aims to:
 
@@ -26,10 +25,10 @@ Over time, TUESDAY aims to:
 
 ## Default application composition
 
-TUESDAY now has a deterministic end-to-end interaction path that composes its
-router, agent registry, conversational baseline agent, and orchestrator. The
-default composition supports the explicit `/chat` and `/conversation`
-directives; it does not infer intent from unrestricted text.
+TUESDAY has a deterministic end-to-end interaction path that composes its
+router, agent registry, conversational baseline agent, request preparer, and
+orchestrator. The default composition supports the explicit `/chat` and
+`/conversation` directives; it does not infer intent from unrestricted text.
 
 ```python
 import asyncio
@@ -54,6 +53,46 @@ print(response.content)  # TUESDAY received: Hello
 The `/chat` directive is used for deterministic routing and removed before the
 conversational agent receives the user-facing content. The original
 `TuesdayRequest` remains unchanged.
+
+## Model-backed application composition
+
+`create_model_backed_orchestrator(...)` composes any
+`BaseLanguageModelProvider` behind the same `conversation` routes, request
+preparation, registry, and orchestration path used by the deterministic runtime.
+The factory itself does not read environment variables, select a provider, or
+construct an OpenAI client.
+
+A caller can opt into the existing OpenAI adapter explicitly:
+
+```python
+import asyncio
+from uuid import uuid4
+
+from tuesday.composition import create_model_backed_orchestrator
+from tuesday.config import load_settings
+from tuesday.domain import ConversationContext, TuesdayRequest
+from tuesday.language_models import OpenAILanguageModelProvider
+
+settings = load_settings()
+if settings.model is None:
+    raise RuntimeError("Model settings are required for model-backed execution.")
+
+provider = OpenAILanguageModelProvider(settings.model)
+orchestrator = create_model_backed_orchestrator(provider)
+
+conversation_id = uuid4()
+request = TuesdayRequest(
+    content="/chat Hello",
+    conversation_id=conversation_id,
+)
+context = ConversationContext(conversation_id=conversation_id)
+
+response = asyncio.run(orchestrator.handle(request, context))
+print(response.content)
+```
+
+This path remains explicit by design: configuring model settings alone does not
+change the default application or trigger provider execution.
 
 ## Development setup
 
@@ -90,9 +129,9 @@ and pull-request expectations are documented in [CONTRIBUTING.md](CONTRIBUTING.m
 
 ## Model runtime configuration
 
-TUESDAY includes optional runtime configuration contracts for future
-language-model providers, but the current default composition performs no LLM
-requests. No provider or model is selected by default. Configuration uses:
+TUESDAY includes optional runtime configuration contracts for language-model
+providers, but the default composition performs no LLM requests. No provider or
+model is selected by default. Configuration uses:
 
 - `TUESDAY_MODEL_PROVIDER`
 - `TUESDAY_MODEL_NAME`
@@ -105,10 +144,10 @@ supplied through environment configuration and are excluded from settings
 representations.
 
 Provider-neutral language-model message, request, response, and asynchronous
-provider contracts are also available. TUESDAY's first concrete adapter uses the
-official OpenAI SDK and implements those provider-neutral contracts, but it is
-not wired into the default application. `/chat` remains deterministic, and
-configuring model settings alone performs no provider call.
+provider contracts are available. TUESDAY's first concrete adapter uses the
+official OpenAI SDK and implements those contracts. It can now be supplied
+explicitly to the model-backed application composition while `/chat` remains
+deterministic in the default composition.
 
 The OpenAI adapter uses the existing TUESDAY-owned runtime variables:
 
@@ -140,14 +179,13 @@ correlation, renders the current request and prior history, performs exactly one
 provider generation, and returns a correlated `TuesdayResponse` containing the
 model-generated text.
 
-The agent keeps the stable registry name `conversation`, so a later composition
-can replace the deterministic conversational implementation without changing
-routing semantics. It does not depend on OpenAI directly, does not implement
-retries or fallbacks, and does not retain conversation history or per-request
-state.
+The agent keeps the stable registry name `conversation`, allowing deterministic
+and model-backed compositions to share routing semantics. It does not depend on
+OpenAI directly, does not implement retries or fallbacks, and does not retain
+conversation history or per-request state.
 
-The default application still uses `ConversationalAgent`; model-backed default
-composition remains a separate integration step.
+The default application still uses `ConversationalAgent`; model-backed execution
+must be selected explicitly through `create_model_backed_orchestrator(...)`.
 
 ## Configuration
 
