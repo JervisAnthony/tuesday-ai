@@ -2,6 +2,7 @@
 
 from tuesday.agents.base import BaseAgent
 from tuesday.agents.conversational import ConversationalAgent
+from tuesday.agents.model_backed import ModelBackedConversationalAgent
 from tuesday.agents.registry import (
     AgentNotFoundError,
     AgentRegistrationError,
@@ -14,4 +15,5 @@ __all__ = [
     "AgentRegistry",
     "BaseAgent",
     "ConversationalAgent",
+    "ModelBackedConversationalAgent",
 ]

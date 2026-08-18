@@ -11,9 +11,10 @@
 </p>
 
 TUESDAY is intended to become a modular, context-aware personal AI operating
-system. It currently includes a deterministic conversational baseline agent used
-to validate the production agent execution path. LLM-backed conversational
-behavior will be introduced later.
+system. It includes both a deterministic conversational baseline agent and a
+provider-neutral model-backed conversational agent. The default application
+composition remains deterministic until model-backed composition is introduced
+deliberately.
 
 Over time, TUESDAY aims to:
 
@@ -107,8 +108,7 @@ Provider-neutral language-model message, request, response, and asynchronous
 provider contracts are also available. TUESDAY's first concrete adapter uses the
 official OpenAI SDK and implements those provider-neutral contracts, but it is
 not wired into the default application. `/chat` remains deterministic, and
-configuring model settings alone performs no provider call; model-backed
-conversation is forthcoming.
+configuring model settings alone performs no provider call.
 
 The OpenAI adapter uses the existing TUESDAY-owned runtime variables:
 
@@ -130,9 +130,24 @@ as the final user message.
 
 The renderer does not call OpenAI or any other provider, does not include
 conversation/request identifiers in model input, and does not mutate the source
-request or context. It is intentionally separate from both provider execution
-and the deterministic `ConversationalAgent`; model-backed conversational
-behavior remains a later composition step.
+request or context.
+
+## Model-backed conversational agent
+
+`ModelBackedConversationalAgent` composes the provider-neutral prompt renderer
+with any `BaseLanguageModelProvider`. For each request it validates conversation
+correlation, renders the current request and prior history, performs exactly one
+provider generation, and returns a correlated `TuesdayResponse` containing the
+model-generated text.
+
+The agent keeps the stable registry name `conversation`, so a later composition
+can replace the deterministic conversational implementation without changing
+routing semantics. It does not depend on OpenAI directly, does not implement
+retries or fallbacks, and does not retain conversation history or per-request
+state.
+
+The default application still uses `ConversationalAgent`; model-backed default
+composition remains a separate integration step.
 
 ## Configuration
 
