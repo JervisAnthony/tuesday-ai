@@ -94,6 +94,41 @@ print(response.content)
 This path remains explicit by design: configuring model settings alone does not
 change the default application or trigger provider execution.
 
+## Conversation history repository
+
+TUESDAY now includes an asynchronous `BaseConversationRepository` boundary for
+conversation history and a deterministic `InMemoryConversationRepository`
+implementation. Repositories return immutable `ConversationContext` snapshots
+and append immutable batches of `ConversationMessage` objects in supplied order.
+
+An unknown conversation reads as an empty context with the requested
+`conversation_id`. Appending the first message batch creates that conversation's
+in-memory history implicitly:
+
+```python
+import asyncio
+from uuid import uuid4
+
+from tuesday.conversations import InMemoryConversationRepository
+from tuesday.domain import ConversationMessage, MessageRole
+
+repository = InMemoryConversationRepository()
+conversation_id = uuid4()
+messages = (
+    ConversationMessage(MessageRole.USER, "Hello"),
+    ConversationMessage(MessageRole.ASSISTANT, "Hi there"),
+)
+
+asyncio.run(repository.append_messages(conversation_id, messages))
+context = asyncio.run(repository.get_context(conversation_id))
+```
+
+The in-memory repository is process-local and intentionally has no database,
+filesystem, model-provider, routing, or orchestration dependency. Application
+execution still receives `ConversationContext` explicitly; automatically loading
+and persisting history belongs to a separate stateful conversation-service
+layer.
+
 ## Development setup
 
 Python 3.13 is recommended for local development. The package supports Python
