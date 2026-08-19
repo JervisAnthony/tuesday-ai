@@ -224,6 +224,22 @@ deterministic executor, obtain or store confirmation, define users or roles,
 classify side effects, provide concrete policies, call models, add integrations,
 or change application composition.
 
+## Guarded tool execution
+
+TUESDAY now composes an explicit `ToolInvocation`, one
+`BaseToolAuthorizationPolicy` evaluation, and a correlated
+`ToolAuthorizationDecision` through `GuardedToolExecutor`. `ALLOW` delegates the
+same invocation to `DeterministicToolExecutor`; `REQUIRE_CONFIRMATION` blocks
+with `ToolConfirmationRequiredError`, while `DENY` blocks with
+`ToolAuthorizationDeniedError`. Malformed or mismatched decisions fail closed
+with `InvalidToolAuthorizationDecisionError`.
+
+Guarded Execution != Confirmation Handling. A denial remains a normal policy
+decision; its exception exists only because execution was attempted. The
+guarded boundary preserves exact invocation and result identities, evaluates
+policy exactly once, executes at most one tool, and provides no retries or
+fallbacks.
+
 ## Development setup
 
 Python 3.13 is recommended for local development. The package supports Python

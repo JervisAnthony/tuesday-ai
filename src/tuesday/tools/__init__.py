@@ -17,6 +17,13 @@ from tuesday.tools.executor import (
     DeterministicToolExecutor,
     InvalidToolResultError,
 )
+from tuesday.tools.guarded import (
+    GuardedToolExecutor,
+    InvalidToolAuthorizationDecisionError,
+    ToolAuthorizationBlockedError,
+    ToolAuthorizationDeniedError,
+    ToolConfirmationRequiredError,
+)
 from tuesday.tools.registry import (
     DuplicateToolError,
     ToolNotFoundError,
@@ -29,9 +36,14 @@ __all__ = [
     "BaseToolAuthorizationPolicy",
     "DeterministicToolExecutor",
     "DuplicateToolError",
+    "GuardedToolExecutor",
+    "InvalidToolAuthorizationDecisionError",
     "InvalidToolResultError",
     "ToolAuthorizationDecision",
+    "ToolAuthorizationBlockedError",
+    "ToolAuthorizationDeniedError",
     "ToolAuthorizationOutcome",
+    "ToolConfirmationRequiredError",
     "ToolExecutionError",
     "ToolInvocation",
     "ToolNotFoundError",
