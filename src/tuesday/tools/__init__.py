@@ -1,5 +1,10 @@
 """Tool execution contracts for TUESDAY."""
 
+from tuesday.tools.authorization import (
+    BaseToolAuthorizationPolicy,
+    ToolAuthorizationDecision,
+    ToolAuthorizationOutcome,
+)
 from tuesday.tools.base import (
     BaseTool,
     ToolExecutionError,
@@ -21,9 +26,12 @@ from tuesday.tools.registry import (
 
 __all__ = [
     "BaseTool",
+    "BaseToolAuthorizationPolicy",
     "DeterministicToolExecutor",
     "DuplicateToolError",
     "InvalidToolResultError",
+    "ToolAuthorizationDecision",
+    "ToolAuthorizationOutcome",
     "ToolExecutionError",
     "ToolInvocation",
     "ToolNotFoundError",

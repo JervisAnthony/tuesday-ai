@@ -209,6 +209,21 @@ Tool Executor != Tool Authorization. This layer does not provide confirmation
 policy, permissions, side-effect classification, model tool-calling, automatic
 tool selection, multi-tool planning, integrations, or application composition.
 
+## Tool authorization policy contracts
+
+TUESDAY now defines a provider-neutral authorization boundary from an explicit
+`ToolInvocation`, through `BaseToolAuthorizationPolicy`, to a
+`ToolAuthorizationDecision`. A policy decision has exactly one outcome:
+`ALLOW`, `REQUIRE_CONFIRMATION`, or `DENY`. Every decision includes a required
+human-readable reason and is correlated to its invocation by both tool name and
+invocation UUID.
+
+Authorization Decision != Tool Execution, and Require Confirmation !=
+Confirmation Received. These contracts do not execute tools, modify the
+deterministic executor, obtain or store confirmation, define users or roles,
+classify side effects, provide concrete policies, call models, add integrations,
+or change application composition.
+
 ## Development setup
 
 Python 3.13 is recommended for local development. The package supports Python
