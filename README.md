@@ -165,6 +165,27 @@ message preserves the original incoming request content exactly, including any
 routing directive. Repository and orchestration failures propagate unchanged;
 there is no retry, rollback, or persistence fallback in this layer.
 
+## Tool execution contracts
+
+TUESDAY now includes provider- and integration-neutral contracts for future
+tool execution. `ToolInvocation` carries a stable tool name, immutable structured
+arguments, and a correlation UUID. `ToolResult` carries the originating tool
+name and invocation UUID together with immutable structured output.
+
+Tool argument and result values are restricted to JSON-compatible data. Mutable
+lists and mappings supplied by callers are recursively snapshotted into tuples
+and read-only mappings so an invocation or result cannot be changed indirectly
+after construction.
+
+`BaseTool` defines a stable machine-friendly name, human-readable description,
+and one asynchronous `execute(...)` operation. `ToolExecutionError` provides the
+common failure boundary for concrete tool adapters.
+
+This layer intentionally does not yet include a tool registry, executor,
+authorization or confirmation policy, retries, model tool-calling, Gmail or
+calendar integrations, or any other external side effect. Those capabilities
+will build on these contracts in separate changes.
+
 ## Development setup
 
 Python 3.13 is recommended for local development. The package supports Python
