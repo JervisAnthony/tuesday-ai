@@ -124,10 +124,46 @@ context = asyncio.run(repository.get_context(conversation_id))
 ```
 
 The in-memory repository is process-local and intentionally has no database,
-filesystem, model-provider, routing, or orchestration dependency. Application
-execution still receives `ConversationContext` explicitly; automatically loading
-and persisting history belongs to a separate stateful conversation-service
-layer.
+filesystem, model-provider, routing, or orchestration dependency.
+
+## Stateful conversation service
+
+`StatefulConversationService` owns the application-level interaction lifecycle
+around an existing `TuesdayOrchestrator` and `BaseConversationRepository`:
+
+`load stored context → execute TUESDAY → persist the successful turn → return`
+
+```python
+import asyncio
+from uuid import uuid4
+
+from tuesday.composition import create_default_orchestrator
+from tuesday.conversations import InMemoryConversationRepository
+from tuesday.domain import TuesdayRequest
+from tuesday.services import StatefulConversationService
+
+repository = InMemoryConversationRepository()
+service = StatefulConversationService(
+    create_default_orchestrator(),
+    repository,
+)
+conversation_id = uuid4()
+
+response = asyncio.run(
+    service.handle(
+        TuesdayRequest(
+            content="/chat Hello",
+            conversation_id=conversation_id,
+        )
+    )
+)
+```
+
+The service loads history before orchestration and appends exactly one user and
+one assistant message only after successful execution. The persisted user
+message preserves the original incoming request content exactly, including any
+routing directive. Repository and orchestration failures propagate unchanged;
+there is no retry, rollback, or persistence fallback in this layer.
 
 ## Development setup
 
