@@ -195,6 +195,20 @@ Tool Registry != Tool Executor. The registry performs no execution. This change
 does not introduce tool execution orchestration, authorization, user
 confirmation, retries, model tool-calling, or external integrations.
 
+## Deterministic tool executor
+
+TUESDAY now has a deterministic executor for an explicitly constructed
+`ToolInvocation`: it performs an exact, case-sensitive `ToolRegistry` lookup,
+passes the same invocation object to one `BaseTool.execute(...)` call, validates
+the returned `ToolResult` name and invocation UUID, and returns that exact
+result object. One executor call executes at most one tool. Lookup and execution
+failures propagate unchanged, invalid result correlation fails explicitly, and
+there are no retries or fallbacks.
+
+Tool Executor != Tool Authorization. This layer does not provide confirmation
+policy, permissions, side-effect classification, model tool-calling, automatic
+tool selection, multi-tool planning, integrations, or application composition.
+
 ## Development setup
 
 Python 3.13 is recommended for local development. The package supports Python

@@ -439,7 +439,9 @@ def test_public_tools_package_exports_contracts() -> None:
     assert tools.ToolResult is ToolResult
     assert tools.__all__ == [
         "BaseTool",
+        "DeterministicToolExecutor",
         "DuplicateToolError",
+        "InvalidToolResultError",
         "ToolExecutionError",
         "ToolInvocation",
         "ToolNotFoundError",

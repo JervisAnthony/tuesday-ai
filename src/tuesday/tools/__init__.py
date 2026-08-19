@@ -8,6 +8,10 @@ from tuesday.tools.base import (
     ToolScalar,
     ToolValue,
 )
+from tuesday.tools.executor import (
+    DeterministicToolExecutor,
+    InvalidToolResultError,
+)
 from tuesday.tools.registry import (
     DuplicateToolError,
     ToolNotFoundError,
@@ -17,7 +21,9 @@ from tuesday.tools.registry import (
 
 __all__ = [
     "BaseTool",
+    "DeterministicToolExecutor",
     "DuplicateToolError",
+    "InvalidToolResultError",
     "ToolExecutionError",
     "ToolInvocation",
     "ToolNotFoundError",
