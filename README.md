@@ -240,6 +240,18 @@ guarded boundary preserves exact invocation and result identities, evaluates
 policy exactly once, executes at most one tool, and provides no retries or
 fallbacks.
 
+## Static tool authorization policy
+
+TUESDAY now includes `StaticToolAuthorizationPolicy`, a deterministic production
+policy that maps exact, case-sensitive tool names to `ALLOW`,
+`REQUIRE_CONFIRMATION`, or `DENY`. Unconfigured names are denied. Matching uses
+no aliases, wildcards, or normalization, and the rule configuration is
+snapshotted when the policy is created.
+
+Static Policy != Tool Registry, and Static Policy != Tool Execution. The policy
+only returns correlated authorization decisions. `REQUIRE_CONFIRMATION` remains
+a policy outcome; this layer does not obtain or store confirmation.
+
 ## Development setup
 
 Python 3.13 is recommended for local development. The package supports Python

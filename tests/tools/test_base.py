@@ -445,6 +445,7 @@ def test_public_tools_package_exports_contracts() -> None:
         "GuardedToolExecutor",
         "InvalidToolAuthorizationDecisionError",
         "InvalidToolResultError",
+        "StaticToolAuthorizationPolicy",
         "ToolAuthorizationDecision",
         "ToolAuthorizationBlockedError",
         "ToolAuthorizationDeniedError",
