@@ -181,10 +181,19 @@ after construction.
 and one asynchronous `execute(...)` operation. `ToolExecutionError` provides the
 common failure boundary for concrete tool adapters.
 
-This layer intentionally does not yet include a tool registry, executor,
-authorization or confirmation policy, retries, model tool-calling, Gmail or
-calendar integrations, or any other external side effect. Those capabilities
-will build on these contracts in separate changes.
+This contract layer does not execute tools or introduce any external side
+effect.
+
+## Tool registry
+
+TUESDAY now has an explicit `ToolRegistry`. Concrete `BaseTool` instances are
+registered under their exact, case-sensitive names, and lookup returns the same
+instances. Registration order is preserved in immutable name snapshots,
+duplicate names are rejected, and separate registry instances remain isolated.
+
+Tool Registry != Tool Executor. The registry performs no execution. This change
+does not introduce tool execution orchestration, authorization, user
+confirmation, retries, model tool-calling, or external integrations.
 
 ## Development setup
 

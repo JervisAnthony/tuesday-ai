@@ -8,11 +8,21 @@ from tuesday.tools.base import (
     ToolScalar,
     ToolValue,
 )
+from tuesday.tools.registry import (
+    DuplicateToolError,
+    ToolNotFoundError,
+    ToolRegistry,
+    ToolRegistryError,
+)
 
 __all__ = [
     "BaseTool",
+    "DuplicateToolError",
     "ToolExecutionError",
     "ToolInvocation",
+    "ToolNotFoundError",
+    "ToolRegistry",
+    "ToolRegistryError",
     "ToolResult",
     "ToolScalar",
     "ToolValue",
