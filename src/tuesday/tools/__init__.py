@@ -30,6 +30,7 @@ from tuesday.tools.registry import (
     ToolRegistry,
     ToolRegistryError,
 )
+from tuesday.tools.static_policy import StaticToolAuthorizationPolicy
 
 __all__ = [
     "BaseTool",
@@ -39,6 +40,7 @@ __all__ = [
     "GuardedToolExecutor",
     "InvalidToolAuthorizationDecisionError",
     "InvalidToolResultError",
+    "StaticToolAuthorizationPolicy",
     "ToolAuthorizationDecision",
     "ToolAuthorizationBlockedError",
     "ToolAuthorizationDeniedError",
