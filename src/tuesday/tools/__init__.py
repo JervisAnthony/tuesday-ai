@@ -13,6 +13,7 @@ from tuesday.tools.base import (
     ToolScalar,
     ToolValue,
 )
+from tuesday.tools.calculator import BasicCalculatorTool
 from tuesday.tools.executor import (
     DeterministicToolExecutor,
     InvalidToolResultError,
@@ -35,6 +36,7 @@ from tuesday.tools.static_policy import StaticToolAuthorizationPolicy
 __all__ = [
     "BaseTool",
     "BaseToolAuthorizationPolicy",
+    "BasicCalculatorTool",
     "DeterministicToolExecutor",
     "DuplicateToolError",
     "GuardedToolExecutor",

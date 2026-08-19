@@ -440,6 +440,7 @@ def test_public_tools_package_exports_contracts() -> None:
     assert tools.__all__ == [
         "BaseTool",
         "BaseToolAuthorizationPolicy",
+        "BasicCalculatorTool",
         "DeterministicToolExecutor",
         "DuplicateToolError",
         "GuardedToolExecutor",
