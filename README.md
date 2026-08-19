@@ -252,6 +252,20 @@ Static Policy != Tool Registry, and Static Policy != Tool Execution. The policy
 only returns correlated authorization decisions. `REQUIRE_CONFIRMATION` remains
 a policy outcome; this layer does not obtain or store confirmation.
 
+## Basic calculator tool
+
+TUESDAY now includes its first concrete executable production tool,
+`BasicCalculatorTool`, with the machine name `calculator.basic`. An invocation
+must supply exactly `operation`, `left`, and `right`; supported operations are
+`add`, `subtract`, `multiply`, and `divide`. Operation matching is exact,
+booleans are not numeric operands, division by zero raises `ToolExecutionError`,
+and non-finite results are rejected.
+
+The calculator performs no arbitrary expression evaluation, external service
+calls, or side effects. Callers may explicitly register it with `ToolRegistry`
+and execute it through `StaticToolAuthorizationPolicy`, `GuardedToolExecutor`,
+and `DeterministicToolExecutor`; it is not automatically enabled.
+
 ## Development setup
 
 Python 3.13 is recommended for local development. The package supports Python
