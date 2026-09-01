@@ -250,7 +250,8 @@ def test_rendered_request_contains_only_language_model_input() -> None:
 
     rendered = renderer.render(request, context)
 
-    assert tuple(field.name for field in fields(rendered)) == ("messages",)
+    assert tuple(field.name for field in fields(rendered)) == ("messages", "tools")
+    assert rendered.tools == ()
     for excluded in (
         "conversation_id",
         "request_id",
