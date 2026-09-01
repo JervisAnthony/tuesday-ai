@@ -15,6 +15,8 @@ from tuesday.language_models import (
     LanguageModelProviderError,
     LanguageModelRequest,
     LanguageModelResponse,
+    LanguageModelToolCall,
+    LanguageModelToolDefinition,
 )
 
 
@@ -127,6 +129,8 @@ def test_language_model_request_is_frozen_and_slotted(
     assert not hasattr(request, "__dict__")
     with pytest.raises(FrozenInstanceError):
         request.messages = ()  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        request.tools = ()  # type: ignore[misc]
 
 
 def test_request_preserves_exact_tuple_and_message_identities(
@@ -155,6 +159,131 @@ def test_request_accepts_one_message_tuple(
     assert request.messages == (user_message,)
 
 
+def test_request_defaults_to_empty_tools_tuple(
+    user_message: LanguageModelMessage,
+) -> None:
+    request = LanguageModelRequest(messages=(user_message,))
+
+    assert request.tools == ()
+    assert isinstance(request.tools, tuple)
+
+
+def test_request_accepts_explicit_empty_tools_tuple(
+    user_message: LanguageModelMessage,
+) -> None:
+    request = LanguageModelRequest(messages=(user_message,), tools=())
+
+    assert request.tools == ()
+
+
+def test_request_preserves_tool_tuple_identities_and_order(
+    user_message: LanguageModelMessage,
+) -> None:
+    first = LanguageModelToolDefinition(
+        name="calendar.lookup",
+        description="Look up calendar events.",
+        parameters={},
+    )
+    second = LanguageModelToolDefinition(
+        name="calculator.basic",
+        description="Perform basic arithmetic.",
+        parameters={},
+    )
+    tools = (first, second)
+
+    request = LanguageModelRequest(messages=(user_message,), tools=tools)
+
+    assert request.tools is tools
+    assert request.tools == (first, second)
+    assert request.tools[0] is first
+    assert request.tools[1] is second
+
+
+@pytest.mark.parametrize("invalid_tools", [[], set(), {}, None, object()])
+def test_request_tools_must_be_tuple(
+    user_message: LanguageModelMessage,
+    invalid_tools: object,
+) -> None:
+    with pytest.raises(TypeError, match="tools must be a tuple"):
+        LanguageModelRequest(
+            messages=(user_message,),
+            tools=invalid_tools,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_tool",
+    [
+        object(),
+        None,
+        "calculator.basic",
+        {},
+        LanguageModelToolCall(
+            call_id="call_1",
+            name="calculator.basic",
+            arguments={},
+        ),
+    ],
+)
+def test_request_tools_require_definition_instances(
+    user_message: LanguageModelMessage,
+    invalid_tool: object,
+) -> None:
+    with pytest.raises(
+        TypeError,
+        match="must be LanguageModelToolDefinition instances",
+    ):
+        LanguageModelRequest(
+            messages=(user_message,),
+            tools=(invalid_tool,),  # type: ignore[arg-type]
+        )
+
+
+def test_request_rejects_exact_duplicate_tool_names(
+    user_message: LanguageModelMessage,
+) -> None:
+    first = LanguageModelToolDefinition(
+        name="calculator.basic",
+        description="First description.",
+        parameters={"version": 1},
+    )
+    second = LanguageModelToolDefinition(
+        name="calculator.basic",
+        description="Different description.",
+        parameters={"version": 2},
+    )
+
+    with pytest.raises(ValueError, match="tool names must be unique"):
+        LanguageModelRequest(
+            messages=(user_message,),
+            tools=(first, second),
+        )
+
+
+def test_request_allows_case_distinct_tool_names(
+    user_message: LanguageModelMessage,
+) -> None:
+    lower = LanguageModelToolDefinition(
+        name="calculator.basic",
+        description="Lowercase capability.",
+        parameters={},
+    )
+    upper = LanguageModelToolDefinition(
+        name="Calculator.Basic",
+        description="Uppercase capability.",
+        parameters={},
+    )
+
+    request = LanguageModelRequest(
+        messages=(user_message,),
+        tools=(lower, upper),
+    )
+
+    assert request.tools == (lower, upper)
+    assert request.tools[0] is lower
+    assert request.tools[1] is upper
+
+
 def test_request_rejects_empty_tuple() -> None:
     with pytest.raises(ValueError, match="must contain a message"):
         LanguageModelRequest(messages=())
@@ -176,7 +305,7 @@ def test_request_has_only_model_input_fields(
 ) -> None:
     request = LanguageModelRequest(messages=(user_message,))
 
-    assert tuple(field.name for field in fields(request)) == ("messages",)
+    assert tuple(field.name for field in fields(request)) == ("messages", "tools")
     for excluded_field in (
         "conversation_id",
         "request_id",
@@ -186,6 +315,9 @@ def test_request_has_only_model_input_fields(
         "api_key",
         "timeout",
         "temperature",
+        "invocation_id",
+        "authorization",
+        "confirmed",
     ):
         assert not hasattr(request, excluded_field)
 
@@ -373,4 +505,9 @@ def test_contract_module_has_only_allowed_dependencies() -> None:
         for alias in node.names
     }
 
-    assert imported_modules == {"abc", "dataclasses", "tuesday.domain"}
+    assert imported_modules == {
+        "abc",
+        "dataclasses",
+        "tuesday.domain",
+        "tuesday.language_models.tools",
+    }

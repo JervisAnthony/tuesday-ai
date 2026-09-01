@@ -18,6 +18,7 @@ from tuesday.language_models import (
     LanguageModelProviderError,
     LanguageModelRequest,
     LanguageModelResponse,
+    LanguageModelToolDefinition,
     OpenAILanguageModelProvider,
 )
 
@@ -280,6 +281,34 @@ def test_responses_api_call_is_stateless_non_streaming_and_minimal() -> None:
         "response_format",
     ):
         assert excluded_argument not in call
+
+
+def test_non_empty_tools_fail_before_responses_api_call() -> None:
+    definition = LanguageModelToolDefinition(
+        name="calculator.basic",
+        description="Perform basic arithmetic.",
+        parameters={"type": "object"},
+    )
+    request = LanguageModelRequest(
+        messages=(LanguageModelMessage(MessageRole.USER, "Calculate"),),
+        tools=(definition,),
+    )
+    responses = FakeResponses()
+    provider = OpenAILanguageModelProvider(
+        make_settings(),
+        client=FakeAsyncOpenAI(responses),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(
+        LanguageModelProviderError,
+        match=(
+            "^OpenAI provider does not yet support language model tool "
+            "definitions\\.$"
+        ),
+    ):
+        run_generate(provider, request)
+
+    assert responses.calls == []
 
 
 def test_configured_temperature_and_model_are_passed_exactly() -> None:

@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from tuesday.domain import MessageRole
+from tuesday.language_models.tools import LanguageModelToolDefinition
 
 __all__ = [
     "BaseLanguageModelProvider",
@@ -35,6 +36,7 @@ class LanguageModelRequest:
     """Immutable provider-neutral input for one text generation."""
 
     messages: tuple[LanguageModelMessage, ...]
+    tools: tuple[LanguageModelToolDefinition, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.messages, tuple):
@@ -48,6 +50,18 @@ class LanguageModelRequest:
                 "Language model request messages must be LanguageModelMessage "
                 "instances."
             )
+        if not isinstance(self.tools, tuple):
+            raise TypeError("Language model request tools must be a tuple.")
+        if not all(
+            isinstance(tool, LanguageModelToolDefinition) for tool in self.tools
+        ):
+            raise TypeError(
+                "Language model request tools must be "
+                "LanguageModelToolDefinition instances."
+            )
+        tool_names = [tool.name for tool in self.tools]
+        if len(tool_names) != len(set(tool_names)):
+            raise ValueError("Language model request tool names must be unique.")
 
 
 @dataclass(frozen=True, slots=True)

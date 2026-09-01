@@ -56,6 +56,12 @@ class OpenAILanguageModelProvider(BaseLanguageModelProvider):
         request: LanguageModelRequest,
     ) -> LanguageModelResponse:
         """Generate one complete response through the OpenAI Responses API."""
+        if request.tools:
+            raise LanguageModelProviderError(
+                "OpenAI provider does not yet support language model tool "
+                "definitions."
+            )
+
         input_messages = [
             {
                 "role": message.role.value,

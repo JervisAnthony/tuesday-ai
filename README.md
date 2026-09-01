@@ -191,9 +191,16 @@ while `LanguageModelToolCall` is structured intent emitted by a language model.
 Neither is executable: `BaseTool` is the executable implementation, and
 `ToolInvocation` is an authorized-execution candidate in the tool domain.
 
-MODEL TOOL REQUEST != EXECUTION AUTHORIZATION. This change intentionally does
-not connect `LanguageModelToolCall` to `ToolInvocation` or modify
-`LanguageModelRequest`, `LanguageModelResponse`, `OpenAILanguageModelProvider`,
+`LanguageModelRequest` can carry an ordered
+`tools: tuple[LanguageModelToolDefinition, ...]`. The tuple defaults to empty
+for text-only requests, preserves caller-defined order, and rejects exact
+duplicate names so model-visible capabilities are unambiguous.
+
+MODEL TOOL REQUEST != EXECUTION AUTHORIZATION. The OpenAI adapter does not yet
+serialize tool definitions: a non-empty request fails explicitly before any
+provider call instead of silently discarding the requested capabilities. Future
+work will add provider mapping. This staged boundary does not connect
+`LanguageModelToolCall` to `ToolInvocation` or modify `LanguageModelResponse`,
 agents, or application composition. A future explicit bridge must create a
 `ToolInvocation` before guarded authorization and execution can occur.
 
