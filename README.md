@@ -184,6 +184,19 @@ common failure boundary for concrete tool adapters.
 This contract layer does not execute tools or introduce any external side
 effect.
 
+## Provider-neutral model tool contracts
+
+`LanguageModelToolDefinition` is a model-visible description of a capability,
+while `LanguageModelToolCall` is structured intent emitted by a language model.
+Neither is executable: `BaseTool` is the executable implementation, and
+`ToolInvocation` is an authorized-execution candidate in the tool domain.
+
+MODEL TOOL REQUEST != EXECUTION AUTHORIZATION. This change intentionally does
+not connect `LanguageModelToolCall` to `ToolInvocation` or modify
+`LanguageModelRequest`, `LanguageModelResponse`, `OpenAILanguageModelProvider`,
+agents, or application composition. A future explicit bridge must create a
+`ToolInvocation` before guarded authorization and execution can occur.
+
 ## Tool registry
 
 TUESDAY now has an explicit `ToolRegistry`. Concrete `BaseTool` instances are
