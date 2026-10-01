@@ -207,13 +207,23 @@ case-sensitive comparison; repeated tool names are allowed.
 calls cause `UnsupportedModelToolCallError`, including responses that also have
 text. MODEL TOOL CALLS MUST NOT BE SILENTLY DISCARDED.
 
-MODEL TOOL REQUEST != EXECUTION AUTHORIZATION. OpenAI tool serialization and
-tool-call parsing are still not implemented in Commit 31. A non-empty request
-fails explicitly before any provider call; OpenAI text responses have empty
-`tool_calls`. This boundary does not connect `LanguageModelToolCall` to
-`ToolInvocation` or change application composition. A future explicit bridge
-must create a `ToolInvocation` before guarded authorization and execution can
-occur.
+`OpenAILanguageModelProvider` serializes explicit `LanguageModelToolDefinition`
+values as Responses API custom function tools, copying frozen schemas into
+plain dictionaries and lists. Empty request tools preserve the text-only payload.
+OpenAI `function_call` output items are decoded into immutable
+`LanguageModelToolCall` values in `LanguageModelResponse.tool_calls`, preserving
+call IDs and output order. Tool-only output becomes `content=None`; mixed output
+preserves both exact text and tool calls. Malformed arguments and call metadata
+fail with safe provider errors.
+
+This is representation, not execution:
+`LanguageModelToolCall != ToolInvocation`,
+MODEL TOOL REQUEST != EXECUTION AUTHORIZATION, and
+MODEL TOOL CALL != TOOL EXECUTION. Commit 32 does not create `ToolInvocation`,
+authorize, confirm, execute, send `function_call_output`, make a second model
+request, or continue reasoning/tool interaction. The conversational agent still
+raises `UnsupportedModelToolCallError` for tool calls; prompt rendering and
+application composition remain unchanged.
 
 ## Tool registry
 
