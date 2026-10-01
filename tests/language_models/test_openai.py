@@ -353,6 +353,7 @@ def test_openai_output_translates_to_provider_neutral_response() -> None:
     assert response.content == "  Generated text  "
     assert response.provider == "openai"
     assert response.model == "actual-returned-model"
+    assert response.tool_calls == ()
 
 
 @pytest.mark.parametrize("output_text", [None, "", "   ", "\t\n"])

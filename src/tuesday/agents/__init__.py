@@ -2,7 +2,10 @@
 
 from tuesday.agents.base import BaseAgent
 from tuesday.agents.conversational import ConversationalAgent
-from tuesday.agents.model_backed import ModelBackedConversationalAgent
+from tuesday.agents.model_backed import (
+    ModelBackedConversationalAgent,
+    UnsupportedModelToolCallError,
+)
 from tuesday.agents.registry import (
     AgentNotFoundError,
     AgentRegistrationError,
@@ -16,4 +19,5 @@ __all__ = [
     "BaseAgent",
     "ConversationalAgent",
     "ModelBackedConversationalAgent",
+    "UnsupportedModelToolCallError",
 ]

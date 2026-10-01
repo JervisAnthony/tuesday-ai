@@ -196,13 +196,24 @@ Neither is executable: `BaseTool` is the executable implementation, and
 for text-only requests, preserves caller-defined order, and rejects exact
 duplicate names so model-visible capabilities are unambiguous.
 
-MODEL TOOL REQUEST != EXECUTION AUTHORIZATION. The OpenAI adapter does not yet
-serialize tool definitions: a non-empty request fails explicitly before any
-provider call instead of silently discarding the requested capabilities. Future
-work will add provider mapping. This staged boundary does not connect
-`LanguageModelToolCall` to `ToolInvocation` or modify `LanguageModelResponse`,
-agents, or application composition. A future explicit bridge must create a
-`ToolInvocation` before guarded authorization and execution can occur.
+`LanguageModelResponse` supports text-only, tool-call-only, and text + tool-call
+responses through `tool_calls: tuple[LanguageModelToolCall, ...]`, defaulting to
+`()` and preserving tuple identity, call identities, and order. `content=None`
+is valid only with at least one tool call; empty or whitespace strings remain
+invalid. Correlation IDs must be unique within a response using exact,
+case-sensitive comparison; repeated tool names are allowed.
+
+`ModelBackedConversationalAgent` remains a text-only consumer. Any model tool
+calls cause `UnsupportedModelToolCallError`, including responses that also have
+text. MODEL TOOL CALLS MUST NOT BE SILENTLY DISCARDED.
+
+MODEL TOOL REQUEST != EXECUTION AUTHORIZATION. OpenAI tool serialization and
+tool-call parsing are still not implemented in Commit 31. A non-empty request
+fails explicitly before any provider call; OpenAI text responses have empty
+`tool_calls`. This boundary does not connect `LanguageModelToolCall` to
+`ToolInvocation` or change application composition. A future explicit bridge
+must create a `ToolInvocation` before guarded authorization and execution can
+occur.
 
 ## Tool registry
 

@@ -332,6 +332,8 @@ def test_language_model_response_is_frozen_and_slotted() -> None:
     assert not hasattr(response, "__dict__")
     with pytest.raises(FrozenInstanceError):
         response.content = "Changed"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        response.tool_calls = ()  # type: ignore[misc]
 
 
 def test_response_preserves_meaningful_values_exactly() -> None:
@@ -348,6 +350,7 @@ def test_response_preserves_meaningful_values_exactly() -> None:
         "content",
         "provider",
         "model",
+        "tool_calls",
     )
 
 
@@ -361,10 +364,11 @@ def test_response_rejects_empty_or_whitespace_content(content: str) -> None:
         )
 
 
-def test_response_rejects_non_string_content() -> None:
-    with pytest.raises(TypeError, match="content must be a string"):
+@pytest.mark.parametrize("content", [42, True, object(), [], {}])
+def test_response_rejects_non_string_content(content: object) -> None:
+    with pytest.raises(TypeError, match="content must be a string or None"):
         LanguageModelResponse(
-            content=42,  # type: ignore[arg-type]
+            content=content,  # type: ignore[arg-type]
             provider="stub",
             model="stub-model",
         )
@@ -418,6 +422,104 @@ def test_response_rejects_non_string_model() -> None:
             provider="stub",
             model=42,  # type: ignore[arg-type]
         )
+
+
+def test_response_preserves_three_positional_argument_construction() -> None:
+    response = LanguageModelResponse("Answer", "stub", "stub-model")
+
+    assert response.content == "Answer"
+    assert response.provider == "stub"
+    assert response.model == "stub-model"
+    assert response.tool_calls == ()
+    assert isinstance(response.tool_calls, tuple)
+
+
+@pytest.mark.parametrize("content", [None, "  Generated answer  "])
+def test_response_accepts_tool_calls_and_preserves_identity_and_order(
+    content: str | None,
+) -> None:
+    first = LanguageModelToolCall("call_1", "unknown.tool", {"unexpected": True})
+    second = LanguageModelToolCall("call_2", "calculator.basic", {})
+    calls = (first, second)
+
+    response = LanguageModelResponse(content, "stub", "stub-model", calls)
+
+    assert response.content == content
+    assert response.tool_calls is calls
+    assert response.tool_calls[0] is first
+    assert response.tool_calls[1] is second
+
+
+def test_response_accepts_explicit_empty_tool_calls_with_text() -> None:
+    response = LanguageModelResponse("  Answer  ", "stub", "stub-model", ())
+
+    assert response.content == "  Answer  "
+    assert response.tool_calls == ()
+
+
+def test_response_rejects_absent_content_and_tool_calls() -> None:
+    with pytest.raises(ValueError, match="must contain content or a tool call"):
+        LanguageModelResponse(None, "stub", "stub-model")
+
+
+@pytest.mark.parametrize("content", ["", "   ", "\t\n"])
+def test_response_rejects_blank_text_even_with_tool_calls(content: str) -> None:
+    call = LanguageModelToolCall("call_1", "calculator.basic", {})
+
+    with pytest.raises(ValueError, match="content must not be empty"):
+        LanguageModelResponse(content, "stub", "stub-model", (call,))
+
+
+@pytest.mark.parametrize("calls", [[], set(), {}, None, object()])
+@pytest.mark.parametrize("content", [None, "Answer"])
+def test_response_tool_calls_must_be_tuple(
+    calls: object, content: str | None,
+) -> None:
+    with pytest.raises(TypeError, match="tool_calls must be a tuple"):
+        LanguageModelResponse(
+            content, "stub", "stub-model", calls,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        object(), None, "calculator.basic", {},
+        LanguageModelToolDefinition("calculator.basic", "Calculate.", {}),
+    ],
+)
+@pytest.mark.parametrize("content", [None, "Answer"])
+def test_response_tool_calls_require_call_instances(
+    call: object, content: str | None,
+) -> None:
+    with pytest.raises(TypeError, match="must be LanguageModelToolCall instances"):
+        LanguageModelResponse(
+            content, "stub", "stub-model", (call,),  # type: ignore[arg-type]
+        )
+
+
+def test_response_rejects_exact_duplicate_call_ids() -> None:
+    first = LanguageModelToolCall("call_1", "calculator.basic", {"left": 1})
+    second = LanguageModelToolCall("call_1", "different.tool", {"left": 2})
+
+    with pytest.raises(ValueError, match="tool call IDs must be unique"):
+        LanguageModelResponse(None, "stub", "stub-model", (first, second))
+
+
+@pytest.mark.parametrize("second_id", ["Call_1", "call_2"])
+def test_response_allows_case_distinct_ids_and_repeated_tool_names(
+    second_id: str,
+) -> None:
+    first = LanguageModelToolCall("call_1", "calculator.basic", {"left": 1})
+    second = LanguageModelToolCall(second_id, "calculator.basic", {"left": 2})
+    calls = (first, second)
+
+    response = LanguageModelResponse(None, "stub", "stub-model", calls)
+
+    assert response.tool_calls is calls
+    assert response.tool_calls[0] is first
+    assert response.tool_calls[1] is second
+    assert response.tool_calls[1].call_id == second_id
 
 
 def test_base_provider_is_abstract_and_incomplete_subclasses_fail() -> None:

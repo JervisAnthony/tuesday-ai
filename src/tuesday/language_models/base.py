@@ -4,7 +4,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from tuesday.domain import MessageRole
-from tuesday.language_models.tools import LanguageModelToolDefinition
+from tuesday.language_models.tools import (
+    LanguageModelToolCall,
+    LanguageModelToolDefinition,
+)
 
 __all__ = [
     "BaseLanguageModelProvider",
@@ -66,16 +69,17 @@ class LanguageModelRequest:
 
 @dataclass(frozen=True, slots=True)
 class LanguageModelResponse:
-    """Immutable text returned by a language-model provider."""
+    """Immutable text and structured tool intent returned by a model provider."""
 
-    content: str
+    content: str | None
     provider: str
     model: str
+    tool_calls: tuple[LanguageModelToolCall, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.content, str):
-            raise TypeError("Language model response content must be a string.")
-        if not self.content.strip():
+        if self.content is not None and not isinstance(self.content, str):
+            raise TypeError("Language model response content must be a string or None.")
+        if isinstance(self.content, str) and not self.content.strip():
             raise ValueError("Language model response content must not be empty.")
 
         if not isinstance(self.provider, str):
@@ -97,6 +101,21 @@ class LanguageModelResponse:
                 "Language model response model must not have surrounding "
                 "whitespace."
             )
+
+        if not isinstance(self.tool_calls, tuple):
+            raise TypeError("Language model response tool_calls must be a tuple.")
+        if not all(isinstance(call, LanguageModelToolCall) for call in self.tool_calls):
+            raise TypeError(
+                "Language model response tool_calls must be "
+                "LanguageModelToolCall instances."
+            )
+        if self.content is None and not self.tool_calls:
+            raise ValueError(
+                "Language model response must contain content or a tool call."
+            )
+        call_ids = [call.call_id for call in self.tool_calls]
+        if len(call_ids) != len(set(call_ids)):
+            raise ValueError("Language model response tool call IDs must be unique.")
 
 
 class LanguageModelProviderError(RuntimeError):
