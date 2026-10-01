@@ -5,7 +5,11 @@ from tuesday.domain import ConversationContext, TuesdayRequest, TuesdayResponse
 from tuesday.language_models import BaseLanguageModelProvider, LanguageModelResponse
 from tuesday.prompting import ConversationalPromptRenderer
 
-__all__ = ["ModelBackedConversationalAgent"]
+__all__ = ["ModelBackedConversationalAgent", "UnsupportedModelToolCallError"]
+
+
+class UnsupportedModelToolCallError(RuntimeError):
+    """Raised when the text-only conversational agent receives model tool calls."""
 
 
 class ModelBackedConversationalAgent(BaseAgent):
@@ -56,6 +60,12 @@ class ModelBackedConversationalAgent(BaseAgent):
         if not isinstance(model_response, LanguageModelResponse):
             raise TypeError(
                 "Language model provider must return a LanguageModelResponse."
+            )
+
+        if model_response.tool_calls:
+            raise UnsupportedModelToolCallError(
+                "Model-backed conversational agent does not yet support "
+                "language model tool calls."
             )
 
         return TuesdayResponse(

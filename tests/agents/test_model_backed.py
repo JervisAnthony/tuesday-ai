@@ -12,6 +12,7 @@ from tuesday.agents import (
     BaseAgent,
     ConversationalAgent,
     ModelBackedConversationalAgent,
+    UnsupportedModelToolCallError,
 )
 from tuesday.domain import (
     ConversationContext,
@@ -26,6 +27,7 @@ from tuesday.language_models import (
     LanguageModelProviderError,
     LanguageModelRequest,
     LanguageModelResponse,
+    LanguageModelToolCall,
 )
 from tuesday.prompting import (
     DEFAULT_CONVERSATIONAL_SYSTEM_PROMPT,
@@ -473,3 +475,36 @@ def test_public_agents_package_exports_model_backed_agent() -> None:
     import tuesday.agents as agents
 
     assert agents.ModelBackedConversationalAgent is ModelBackedConversationalAgent
+    assert agents.UnsupportedModelToolCallError is UnsupportedModelToolCallError
+    assert "UnsupportedModelToolCallError" in agents.__all__
+    assert (
+        model_backed_module.UnsupportedModelToolCallError
+        is UnsupportedModelToolCallError
+    )
+    assert "UnsupportedModelToolCallError" in model_backed_module.__all__
+
+
+@pytest.mark.parametrize("content", [None, "I'll calculate that."])
+def test_agent_rejects_model_tool_calls_without_discarding_or_retrying(
+    content: str | None,
+) -> None:
+    call = LanguageModelToolCall(
+        call_id="call_1",
+        name="calculator.basic",
+        arguments={"operation": "multiply", "left": 6, "right": 7},
+    )
+    provider = RecordingProvider(
+        responses=(LanguageModelResponse(content, "stub", "stub-model", (call,)),)
+    )
+    agent = ModelBackedConversationalAgent(provider)
+    request, context = matching_interaction()
+
+    with pytest.raises(UnsupportedModelToolCallError) as caught:
+        run_handle(agent, request, context)
+
+    assert str(caught.value) == (
+        "Model-backed conversational agent does not yet support "
+        "language model tool calls."
+    )
+    assert isinstance(caught.value, RuntimeError)
+    assert len(provider.requests) == 1
