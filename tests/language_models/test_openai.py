@@ -3,8 +3,10 @@
 import ast
 import asyncio
 import inspect
+import json
 import tomllib
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 from openai import OpenAIError
@@ -18,17 +20,43 @@ from tuesday.language_models import (
     LanguageModelProviderError,
     LanguageModelRequest,
     LanguageModelResponse,
+    LanguageModelToolCall,
     LanguageModelToolDefinition,
     OpenAILanguageModelProvider,
 )
 
 
+class FakeOutputItem:
+    """Small output item fake; call_id deliberately differs from the item ID."""
+
+    def __init__(
+        self,
+        type: str = "function_call",
+        *,
+        call_id: object = "call_1",
+        name: object = "calculator.basic",
+        arguments: object = '{"operation":"multiply","left":6,"right":7}',
+    ) -> None:
+        self.type = type
+        self.id = "fc_separate_item_id"
+        self.call_id = call_id
+        self.name = name
+        self.arguments = arguments
+
+
 class FakeOpenAIResponse:
     """Minimal fake of the public OpenAI response values the adapter reads."""
 
-    def __init__(self, output_text: object, model: str = "returned-model") -> None:
+    def __init__(
+        self,
+        output_text: object,
+        model: str = "returned-model",
+        *,
+        output: tuple[FakeOutputItem, ...] = (),
+    ) -> None:
         self.output_text = output_text
         self.model = model
+        self.output = output
 
 
 class FakeResponses:
@@ -82,6 +110,15 @@ def run_generate(
     request: LanguageModelRequest | None = None,
 ) -> LanguageModelResponse:
     return asyncio.run(provider.generate(request or make_request()))
+
+
+def run_output(output_text: object, *items: FakeOutputItem) -> LanguageModelResponse:
+    responses = FakeResponses(FakeOpenAIResponse(output_text, output=items))
+    provider = OpenAILanguageModelProvider(
+        make_settings(),
+        client=FakeAsyncOpenAI(responses),  # type: ignore[arg-type]
+    )
+    return run_generate(provider)
 
 
 def test_provider_implements_async_base_contract_and_exact_name() -> None:
@@ -274,6 +311,8 @@ def test_responses_api_call_is_stateless_non_streaming_and_minimal() -> None:
     for excluded_argument in (
         "tools",
         "tool_choice",
+        "parallel_tool_calls",
+        "max_tool_calls",
         "previous_response_id",
         "conversation",
         "conversation_id",
@@ -283,32 +322,267 @@ def test_responses_api_call_is_stateless_non_streaming_and_minimal() -> None:
         assert excluded_argument not in call
 
 
-def test_non_empty_tools_fail_before_responses_api_call() -> None:
+@pytest.mark.parametrize("output_text", [None, "  I'll calculate that.  "])
+def test_tool_definition_serialization_and_function_call_translation(
+    output_text: str | None,
+) -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "operation": {"type": "string", "enum": ["add", "multiply"]},
+            "left": {"type": "number"},
+            "right": {"type": "number"},
+        },
+        "required": ["operation", "left", "right"],
+        "additionalProperties": False,
+        "metadata": {"nullable": None, "default": 1.5, "version": 2},
+    }
     definition = LanguageModelToolDefinition(
         name="calculator.basic",
-        description="Perform basic arithmetic.",
-        parameters={"type": "object"},
+        description="Perform basic\n arithmetic.",
+        parameters=schema,
     )
     request = LanguageModelRequest(
         messages=(LanguageModelMessage(MessageRole.USER, "Calculate"),),
         tools=(definition,),
     )
-    responses = FakeResponses()
+    calls = request.tools
+    parameters = definition.parameters
+    properties = parameters["properties"]
+    required = parameters["required"]
+    responses = FakeResponses(
+        FakeOpenAIResponse(output_text, output=(FakeOutputItem(),))
+    )
     provider = OpenAILanguageModelProvider(
         make_settings(),
         client=FakeAsyncOpenAI(responses),  # type: ignore[arg-type]
     )
 
-    with pytest.raises(
-        LanguageModelProviderError,
-        match=(
-            "^OpenAI provider does not yet support language model tool "
-            "definitions\\.$"
-        ),
-    ):
-        run_generate(provider, request)
+    response = run_generate(provider, request)
 
-    assert responses.calls == []
+    assert len(responses.calls) == 1
+    payload = responses.calls[0]
+    assert payload == {
+        "model": "example-model",
+        "input": [{"role": "user", "content": "Calculate"}],
+        "store": False,
+        "stream": False,
+        "tools": [
+            {
+                "type": "function",
+                "name": "calculator.basic",
+                "description": "Perform basic\n arithmetic.",
+                "parameters": schema,
+            }
+        ],
+    }
+    serialized = payload["tools"][0]["parameters"]
+    assert type(serialized) is dict
+    assert type(serialized["properties"]) is dict
+    assert type(serialized["properties"]["operation"]) is dict
+    assert type(serialized["properties"]["operation"]["enum"]) is list
+    assert type(serialized["required"]) is list
+    for key, value in schema["metadata"].items():
+        assert type(serialized["metadata"][key]) is type(value)
+    assert json.loads(json.dumps(serialized)) == schema
+    assert response.content == output_text
+    assert response.provider == "openai"
+    assert response.model == "returned-model"
+    assert isinstance(response.tool_calls, tuple)
+    assert len(response.tool_calls) == 1
+    call = response.tool_calls[0]
+    assert isinstance(call, LanguageModelToolCall)
+    assert call.call_id == "call_1"
+    assert call.name == "calculator.basic"
+    assert call.arguments == {"operation": "multiply", "left": 6, "right": 7}
+
+    serialized["properties"]["operation"]["enum"].append("changed")
+    serialized["required"].append("changed")
+    serialized["metadata"]["version"] = 99
+    assert request.tools is calls
+    assert request.tools[0] is definition
+    assert definition.parameters is parameters
+    assert parameters["properties"] is properties
+    assert parameters["required"] is required
+    assert properties["operation"]["enum"] == ("add", "multiply")
+    assert required == ("operation", "left", "right")
+    assert parameters["metadata"]["version"] == 2
+    with pytest.raises(TypeError):
+        properties["operation"]["type"] = "changed"
+
+
+def test_multiple_tool_definitions_preserve_exact_order_and_are_independent() -> None:
+    first = LanguageModelToolDefinition("Z.lookup", "Look up data.", {})
+    second = LanguageModelToolDefinition("a.calculate", "Calculate.", {})
+    request = LanguageModelRequest(make_request().messages, (first, second))
+    responses = FakeResponses()
+    provider = OpenAILanguageModelProvider(
+        make_settings(temperature=0.2),
+        client=FakeAsyncOpenAI(responses),  # type: ignore[arg-type]
+    )
+
+    run_generate(provider, request)
+    run_generate(provider, request)
+    run_generate(provider)
+
+    for payload in responses.calls[:2]:
+        assert payload["tools"] == [
+            {
+                "type": "function",
+                "name": "Z.lookup",
+                "description": "Look up data.",
+                "parameters": {},
+            },
+            {
+                "type": "function",
+                "name": "a.calculate",
+                "description": "Calculate.",
+                "parameters": {},
+            },
+        ]
+        assert payload["temperature"] == 0.2
+        assert "tool_choice" not in payload
+        assert "parallel_tool_calls" not in payload
+        assert "max_tool_calls" not in payload
+    assert responses.calls[0]["tools"] is not responses.calls[1]["tools"]
+    assert responses.calls[0]["tools"][0] is not responses.calls[0]["tools"][1]
+    assert (
+        responses.calls[0]["tools"][0]["parameters"]
+        is not responses.calls[1]["tools"][0]["parameters"]
+    )
+    assert "tools" not in responses.calls[2]
+
+
+@pytest.mark.parametrize("output_text", [None, "", "   ", "\t\n"])
+def test_valid_function_call_without_meaningful_text(output_text: object) -> None:
+    response = run_output(output_text, FakeOutputItem())
+
+    assert response.content is None
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].call_id == "call_1"
+
+
+def test_multiple_calls_preserve_order_and_ignore_unrelated_items() -> None:
+    response = run_output(
+        "  Mixed response  ",
+        FakeOutputItem("reasoning"),
+        FakeOutputItem(call_id="z_call", name="Z.unknown", arguments='{"value":1}'),
+        FakeOutputItem("message"),
+        FakeOutputItem(call_id="a_call", name="a.unknown", arguments='{"value":2}'),
+        FakeOutputItem("provider_metadata"),
+        FakeOutputItem("Function_call"),
+    )
+
+    assert response.content == "  Mixed response  "
+    assert [
+        (call.call_id, call.name, dict(call.arguments)) for call in response.tool_calls
+    ] == [
+        ("z_call", "Z.unknown", {"value": 1}),
+        ("a_call", "a.unknown", {"value": 2}),
+    ]
+
+
+def test_nested_arguments_delegate_freezing_to_model_tool_call() -> None:
+    response = run_output(
+        None,
+        FakeOutputItem(
+            name="provider.unknown",
+            arguments=('{"options":{"items":[1,2.5,"text",true,null,{"ok":false}]}}'),
+        ),
+    )
+    call = response.tool_calls[0]
+    assert call.name == "provider.unknown"
+    assert isinstance(call.arguments, MappingProxyType)
+    assert isinstance(call.arguments["options"], MappingProxyType)
+    items = call.arguments["options"]["items"]
+    assert items == (1, 2.5, "text", True, None, {"ok": False})
+    assert isinstance(items, tuple)
+    assert isinstance(items[-1], MappingProxyType)
+    with pytest.raises(TypeError):
+        items[-1]["ok"] = True
+
+
+def test_malformed_json_has_safe_error_and_chained_cause() -> None:
+    arguments = '{"private_left":'
+
+    with pytest.raises(LanguageModelProviderError) as caught:
+        run_output(None, FakeOutputItem(arguments=arguments))
+
+    assert str(caught.value) == "OpenAI provider returned invalid tool call arguments."
+    assert arguments not in str(caught.value)
+    assert isinstance(caught.value.__cause__, json.JSONDecodeError)
+
+
+@pytest.mark.parametrize("arguments", [None, 42, {}, [], True, b"{}"])
+def test_non_string_arguments_fail_safely(arguments: object) -> None:
+    with pytest.raises(LanguageModelProviderError) as caught:
+        run_output(None, FakeOutputItem(arguments=arguments))
+
+    assert str(caught.value) == "OpenAI provider returned invalid tool call arguments."
+
+
+@pytest.mark.parametrize(
+    "arguments", ["[]", "[1,2]", "42", '"hello"', "true", "false", "null"]
+)
+def test_non_object_json_arguments_fail_safely(arguments: str) -> None:
+    with pytest.raises(LanguageModelProviderError) as caught:
+        run_output(None, FakeOutputItem(arguments=arguments))
+
+    assert str(caught.value) == "OpenAI provider returned invalid tool call arguments."
+
+
+@pytest.mark.parametrize("field", ["call_id", "name"])
+@pytest.mark.parametrize("value", ["", " ", " private_value ", None, 42])
+def test_invalid_call_metadata_has_safe_error_and_cause(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(LanguageModelProviderError) as caught:
+        run_output(None, FakeOutputItem(**{field: value}))
+
+    assert str(caught.value) == "OpenAI provider returned an invalid tool call."
+    assert isinstance(caught.value.__cause__, (TypeError, ValueError))
+
+
+@pytest.mark.parametrize(
+    "arguments", ['{"value":NaN}', '{"value":Infinity}', '{"value":1e999}']
+)
+def test_invalid_recursive_arguments_fail_through_domain_validation(
+    arguments: str,
+) -> None:
+    with pytest.raises(LanguageModelProviderError) as caught:
+        run_output(None, FakeOutputItem(arguments=arguments))
+
+    assert str(caught.value) == "OpenAI provider returned an invalid tool call."
+    assert isinstance(caught.value.__cause__, ValueError)
+
+
+@pytest.mark.parametrize("with_call", [False, True])
+@pytest.mark.parametrize("output_text", [42, True, {}, []])
+def test_invalid_text_type_fails_even_with_tool_calls(
+    with_call: bool,
+    output_text: object,
+) -> None:
+    items = (FakeOutputItem(),) if with_call else ()
+    with pytest.raises(LanguageModelProviderError) as caught:
+        run_output(output_text, *items)
+
+    assert str(caught.value) == "OpenAI provider returned no text content."
+
+
+def test_duplicate_provider_call_ids_are_rejected_without_deduplication() -> None:
+    with pytest.raises(ValueError, match="tool call IDs must be unique"):
+        run_output(None, FakeOutputItem(), FakeOutputItem(name="different.tool"))
+
+
+def test_case_distinct_call_ids_and_repeated_tool_names_are_preserved() -> None:
+    response = run_output(None, FakeOutputItem(), FakeOutputItem(call_id="Call_1"))
+
+    assert [call.call_id for call in response.tool_calls] == ["call_1", "Call_1"]
+    assert [call.name for call in response.tool_calls] == [
+        "calculator.basic",
+        "calculator.basic",
+    ]
 
 
 def test_configured_temperature_and_model_are_passed_exactly() -> None:
@@ -462,9 +736,12 @@ def test_adapter_has_only_allowed_architectural_dependencies() -> None:
     }
 
     assert imported_modules == {
+        "json",
+        "collections.abc",
         "openai",
         "tuesday.config",
         "tuesday.language_models.base",
+        "tuesday.language_models.tools",
     }
 
 
