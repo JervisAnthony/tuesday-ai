@@ -225,6 +225,38 @@ request, or continue reasoning/tool interaction. The conversational agent still
 raises `UnsupportedModelToolCallError` for tool calls; prompt rendering and
 application composition remain unchanged.
 
+## Explicit model tool invocation bridge
+
+`LanguageModelToolCall → ModelToolInvocationBridge → ToolInvocation` is an
+explicit, provider-neutral translation from model intent to an execution candidate:
+
+```python
+from tuesday.bridges import ModelToolInvocationBridge
+from tuesday.language_models.tools import LanguageModelToolCall
+
+tool_call = LanguageModelToolCall("call_abc123", "calculator.basic", {"left": 6})
+invocation = ModelToolInvocationBridge().to_invocation(tool_call)
+```
+
+Each synchronous conversion preserves the exact tool name and passes arguments
+through `ToolInvocation` to create a fresh, independent immutable snapshot.
+Unknown tool names remain bridgeable. The target's stricter top-level argument
+name validation still applies; names and keys are never normalized, and nested
+keys receive no additional bridge validation. Target failures propagate unchanged.
+
+The bridge generates a new execution UUID using `uuid4` by default, or an injected
+`invocation_id_factory`, called exactly once after source-type validation. The
+original model call remains unchanged: its opaque `call_id` is never parsed or
+reused as `invocation_id`. The original call must remain available to a future
+tool-result continuation layer for provider/model correlation.
+
+`LanguageModelToolCall != ToolInvocation`.
+MODEL CALL ID != EXECUTION INVOCATION ID.
+MODEL TOOL CALL != TOOL EXECUTION.
+TOOL INVOCATION CANDIDATE != AUTHORIZED EXECUTION.
+The bridge does not check registry membership, authorize, confirm, or execute.
+It does not handle results, continue model interaction, or change composition.
+
 ## Tool registry
 
 TUESDAY now has an explicit `ToolRegistry`. Concrete `BaseTool` instances are
