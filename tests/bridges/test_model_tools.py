@@ -224,7 +224,11 @@ def test_default_factory_returns_uuid() -> None:
 
 def test_public_surface_is_small_and_synchronous() -> None:
     assert bridges.ModelToolInvocationBridge is ModelToolInvocationBridge
-    assert bridges.__all__ == ["ModelToolInvocationBridge"]
+    assert bridges.__all__ == [
+        "GuardedModelToolExecutor",
+        "ModelToolExecution",
+        "ModelToolInvocationBridge",
+    ]
     assert not inspect.iscoroutinefunction(ModelToolInvocationBridge.to_invocation)
     assert tuple(
         inspect.signature(ModelToolInvocationBridge.to_invocation).parameters

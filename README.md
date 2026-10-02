@@ -257,6 +257,35 @@ TOOL INVOCATION CANDIDATE != AUTHORIZED EXECUTION.
 The bridge does not check registry membership, authorize, confirm, or execute.
 It does not handle results, continue model interaction, or change composition.
 
+## Guarded model-requested tool execution
+
+`GuardedModelToolExecutor` accepts exactly one `LanguageModelToolCall` and calls
+`ModelToolInvocationBridge` once to create a `ToolInvocation`. It then delegates
+exclusively through `GuardedToolExecutor`: authorization precedes deterministic
+execution, registry lookup, and tool execution. A successful `ToolResult` becomes
+a frozen `ModelToolExecution` retaining the original model call, exact invocation,
+and exact result, with validated names, arguments, and execution UUID correlation.
+
+`ALLOW` may execute. `REQUIRE_CONFIRMATION` blocks through the existing
+`ToolConfirmationRequiredError`; `DENY` blocks through
+`ToolAuthorizationDeniedError`. Unconfigured tools are denied by static policy
+before registry lookup. An explicitly allowed unknown tool can reach the registry
+and fail with `ToolNotFoundError`. Failures propagate without retries or fallbacks.
+This API does not request, store, or resume confirmations.
+
+MODEL CALL ID != EXECUTION INVOCATION ID.
+MODEL TOOL CALL != TOOL EXECUTION.
+TOOL INVOCATION CANDIDATE != AUTHORIZED EXECUTION.
+MODEL TOOL EXECUTION MUST PASS THROUGH AUTHORIZATION.
+The original `call_id` remains available through `execution.tool_call.call_id`;
+it is never passed into tool execution as the invocation UUID.
+
+`ModelToolExecution` is the terminal successful result of this stage. A future
+continuation layer may use `execution.tool_call.call_id` and `execution.result`.
+No provider continuation, second model request, or agent loop occurs here.
+Caller composition remains explicit: no agent is automatically wired to this API,
+and conversation handling still rejects model tool calls.
+
 ## Tool registry
 
 TUESDAY now has an explicit `ToolRegistry`. Concrete `BaseTool` instances are
