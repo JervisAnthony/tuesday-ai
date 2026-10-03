@@ -8,6 +8,10 @@ from tuesday.language_models.base import (
     LanguageModelResponse,
 )
 from tuesday.language_models.openai import OpenAILanguageModelProvider
+from tuesday.language_models.openai_continuation import (
+    OpenAIContinuationState,
+    OpenAIGenerationResult,
+)
 from tuesday.language_models.tools import (
     LanguageModelToolCall,
     LanguageModelToolDefinition,
@@ -27,5 +31,7 @@ __all__ = [
     "LanguageModelToolResult",
     "LanguageModelToolScalar",
     "LanguageModelToolValue",
+    "OpenAIContinuationState",
+    "OpenAIGenerationResult",
     "OpenAILanguageModelProvider",
 ]
