@@ -11,6 +11,7 @@ from tuesday.language_models.openai import OpenAILanguageModelProvider
 from tuesday.language_models.tools import (
     LanguageModelToolCall,
     LanguageModelToolDefinition,
+    LanguageModelToolResult,
     LanguageModelToolScalar,
     LanguageModelToolValue,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "LanguageModelResponse",
     "LanguageModelToolCall",
     "LanguageModelToolDefinition",
+    "LanguageModelToolResult",
     "LanguageModelToolScalar",
     "LanguageModelToolValue",
     "OpenAILanguageModelProvider",

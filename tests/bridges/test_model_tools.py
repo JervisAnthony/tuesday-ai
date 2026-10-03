@@ -228,6 +228,7 @@ def test_public_surface_is_small_and_synchronous() -> None:
         "GuardedModelToolExecutor",
         "ModelToolExecution",
         "ModelToolInvocationBridge",
+        "ModelToolResultBridge",
     ]
     assert not inspect.iscoroutinefunction(ModelToolInvocationBridge.to_invocation)
     assert tuple(

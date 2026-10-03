@@ -410,6 +410,7 @@ def test_public_exports_and_async_single_call_surface() -> None:
         "GuardedModelToolExecutor",
         "ModelToolExecution",
         "ModelToolInvocationBridge",
+        "ModelToolResultBridge",
     ]
     executor, _, _, _ = make_stack({})
     assert not hasattr(executor, "__dict__")
