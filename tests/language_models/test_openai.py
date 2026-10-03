@@ -741,6 +741,7 @@ def test_adapter_has_only_allowed_architectural_dependencies() -> None:
         "openai",
         "tuesday.config",
         "tuesday.language_models.base",
+        "tuesday.language_models.openai_continuation",
         "tuesday.language_models.tools",
     }
 

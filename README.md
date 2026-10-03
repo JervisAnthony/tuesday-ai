@@ -309,6 +309,43 @@ stateless/reasoning-capable continuation may also require preserving and replayi
 prior provider output items. This stage neither models nor sends that continuation
 state, serializes output for a provider, or makes a second model request.
 
+## Stateless OpenAI tool continuation
+
+`OpenAILanguageModelProvider.generate_with_continuation(request)` returns an
+`OpenAIGenerationResult`: the existing `LanguageModelResponse` plus an optional
+`OpenAIContinuationState` for pending function calls. Ordinary `generate()` keeps
+its existing behavior and does not capture replay state.
+
+The caller executes tools through the guarded application path outside the
+provider and obtains `LanguageModelToolResult` values. An explicit
+`continue_with_tool_results(state, results)` call requires all pending call IDs
+to match exactly in order, then performs one Responses request. Its input contains
+the original messages, all accumulated provider items, and new
+`function_call_output` items using original model call IDs and JSON-text outputs
+(including JSON `null` for `None`). Original tools, configured model, and optional
+temperature come from the saved state.
+
+`store=False` and `stream=False` remain unchanged; `previous_response_id` is not
+used. Every provider output item is snapshotted using public SDK serialization.
+Reasoning and encrypted fields are preserved opaquely when returned, with no raw
+SDK objects retained in state. This follows the
+[OpenAI manual replay guidance](https://developers.openai.com/api/docs/guides/reasoning).
+A continued response with more calls yields a new state accumulating prior
+items, submitted outputs, and new provider items in order. Final text returns
+`continuation=None`.
+
+MODEL CALL ID != EXECUTION INVOCATION ID.
+MODEL TOOL RESULT != PROVIDER CONTINUATION.
+PROVIDER CONTINUATION STATE != LANGUAGE MODEL RESPONSE.
+STATELESS CONTINUATION MUST REPLAY PROVIDER OUTPUT ITEMS.
+FUNCTION CALL OUTPUT MUST USE THE ORIGINAL MODEL CALL ID.
+TOOL EXECUTION MUST REMAIN OUTSIDE THE OPENAI ADAPTER.
+
+Commit 36 exposes explicit provider continuation primitives. It does not connect
+`ModelBackedConversationalAgent` to `GuardedModelToolExecutor` or automatically
+iterate model/tool/model cycles. Each additional continuation requires a caller
+action; no automatic loop, confirmation completion, or composition is added.
+
 ## Tool registry
 
 TUESDAY now has an explicit `ToolRegistry`. Concrete `BaseTool` instances are

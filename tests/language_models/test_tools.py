@@ -412,6 +412,8 @@ def test_public_language_models_package_exports_tool_contracts() -> None:
         "LanguageModelToolResult",
         "LanguageModelToolScalar",
         "LanguageModelToolValue",
+        "OpenAIContinuationState",
+        "OpenAIGenerationResult",
         "OpenAILanguageModelProvider",
     ]
 
