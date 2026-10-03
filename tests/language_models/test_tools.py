@@ -15,6 +15,7 @@ import tuesday.language_models.tools as model_tools
 from tuesday.language_models import (
     LanguageModelToolCall,
     LanguageModelToolDefinition,
+    LanguageModelToolResult,
     LanguageModelToolScalar,
     LanguageModelToolValue,
 )
@@ -390,6 +391,14 @@ def test_call_uses_recursive_value_validation() -> None:
 def test_public_language_models_package_exports_tool_contracts() -> None:
     assert language_models.LanguageModelToolCall is LanguageModelToolCall
     assert language_models.LanguageModelToolDefinition is LanguageModelToolDefinition
+    assert language_models.LanguageModelToolResult is LanguageModelToolResult
+    assert model_tools.__all__ == [
+        "LanguageModelToolCall",
+        "LanguageModelToolDefinition",
+        "LanguageModelToolResult",
+        "LanguageModelToolScalar",
+        "LanguageModelToolValue",
+    ]
     assert language_models.LanguageModelToolScalar is LanguageModelToolScalar
     assert language_models.LanguageModelToolValue is LanguageModelToolValue
     assert language_models.__all__ == [
@@ -400,6 +409,7 @@ def test_public_language_models_package_exports_tool_contracts() -> None:
         "LanguageModelResponse",
         "LanguageModelToolCall",
         "LanguageModelToolDefinition",
+        "LanguageModelToolResult",
         "LanguageModelToolScalar",
         "LanguageModelToolValue",
         "OpenAILanguageModelProvider",
@@ -424,3 +434,113 @@ def test_tool_contract_module_has_only_standard_library_dependencies() -> None:
         "typing",
     }
     assert all(not module.startswith("tuesday") for module in imported_modules)
+
+
+def test_result_is_frozen_slotted_and_has_exact_fields() -> None:
+    result = LanguageModelToolResult("call_1", {"items": [1]})
+    other = LanguageModelToolResult("call_1", {"items": [1]})
+    assert tuple(field.name for field in fields(result)) == ("call_id", "output")
+    assert not hasattr(result, "__dict__")
+    assert result == other
+    assert result is not other
+    assert result.output is not other.output
+    assert result != LanguageModelToolResult("call_2", result.output)
+    assert result != LanguageModelToolResult("call_1", None)
+    for field in ("call_id", "output"):
+        with pytest.raises(FrozenInstanceError):
+            setattr(result, field, None)
+
+
+@pytest.mark.parametrize("call_id", [None, 1, True, object()])
+def test_result_call_id_requires_string(call_id: object) -> None:
+    with pytest.raises(TypeError) as caught:
+        LanguageModelToolResult(call_id, None)  # type: ignore[arg-type]
+    assert str(caught.value) == "Language model tool result call_id must be a string."
+
+
+@pytest.mark.parametrize("call_id", ["", " ", "\t", "\n"])
+def test_result_call_id_requires_meaningful_text(call_id: str) -> None:
+    with pytest.raises(ValueError) as caught:
+        LanguageModelToolResult(call_id, None)
+    assert str(caught.value) == "Language model tool result call_id must not be empty."
+
+
+@pytest.mark.parametrize("call_id", [" call_1", "call_1 "])
+def test_result_call_id_rejects_surrounding_whitespace(call_id: str) -> None:
+    with pytest.raises(ValueError) as caught:
+        LanguageModelToolResult(call_id, None)
+    assert str(caught.value) == (
+        "Language model tool result call_id must not have surrounding whitespace."
+    )
+
+
+@pytest.mark.parametrize(
+    "call_id",
+    [
+        "call_abc123",
+        "toolu_01XYZ",
+        "provider-specific:id",
+        "123e4567-e89b-12d3-a456-426614174000",
+    ],
+)
+def test_result_preserves_opaque_call_id(call_id: str) -> None:
+    assert LanguageModelToolResult(call_id, None).call_id == call_id
+
+
+@pytest.mark.parametrize("output", [None, "", "answer", 0, 42, 1.5, True, False])
+def test_result_preserves_scalar_values_and_types(output: object) -> None:
+    result = LanguageModelToolResult("call_1", output)  # type: ignore[arg-type]
+    assert result.output == output
+    assert type(result.output) is type(output)
+
+
+def test_result_deeply_snapshots_caller_output() -> None:
+    items = [1, 2]
+    nested = {"success": True}
+    output = {"items": items, "nested": nested, "array": ({"": None},)}
+    result = LanguageModelToolResult("call_1", output)
+    items.append(3)
+    nested["success"] = False
+    output["new"] = 1
+    assert result.output == {
+        "items": (1, 2),
+        "nested": {"success": True},
+        "array": ({"": None},),
+    }
+    assert isinstance(result.output, MappingProxyType)
+    assert isinstance(result.output["items"], tuple)
+    for mapping in (result.output, result.output["nested"], result.output["array"][0]):
+        with pytest.raises(TypeError):
+            mapping["new"] = 1
+
+
+@pytest.mark.parametrize("output", [set(), object(), b"", bytearray(), uuid4()])
+@pytest.mark.parametrize("nested", [False, True])
+def test_result_rejects_unsupported_values(output: object, nested: bool) -> None:
+    value = {"items": [output]} if nested else output
+    with pytest.raises(TypeError) as caught:
+        LanguageModelToolResult("call_1", value)  # type: ignore[arg-type]
+    assert str(caught.value) == "Language model tool values must be JSON-compatible."
+
+
+@pytest.mark.parametrize("output", [nan, inf, -inf])
+@pytest.mark.parametrize("nested", [False, True])
+def test_result_rejects_non_finite_values(output: float, nested: bool) -> None:
+    value = {"items": [output]} if nested else output
+    with pytest.raises(ValueError) as caught:
+        LanguageModelToolResult("call_1", value)
+    assert str(caught.value) == (
+        "Language model tool floating-point values must be finite."
+    )
+
+
+@pytest.mark.parametrize("key", [1, True, None, object()])
+def test_result_rejects_non_string_mapping_keys(key: object) -> None:
+    with pytest.raises(TypeError) as caught:
+        LanguageModelToolResult("call_1", {"nested": {key: 1}})
+    assert str(caught.value) == "Language model tool object keys must be strings."
+
+
+def test_result_accepts_abstract_mappings_and_arbitrary_string_keys() -> None:
+    result = LanguageModelToolResult("call_1", CustomMapping({"": 1, " key ": 2}))
+    assert result.output == {"": 1, " key ": 2}

@@ -18,6 +18,7 @@ LanguageModelToolValue: TypeAlias = (
 __all__ = [
     "LanguageModelToolCall",
     "LanguageModelToolDefinition",
+    "LanguageModelToolResult",
     "LanguageModelToolScalar",
     "LanguageModelToolValue",
 ]
@@ -94,3 +95,18 @@ class LanguageModelToolCall:
                 "Language model tool call arguments must be a mapping."
             )
         object.__setattr__(self, "arguments", _freeze_value(self.arguments))
+
+
+@dataclass(frozen=True, slots=True)
+class LanguageModelToolResult:
+    """An immutable successful tool output correlated to a model call."""
+
+    call_id: str
+    output: LanguageModelToolValue
+
+    def __post_init__(self) -> None:
+        _require_meaningful_text(
+            self.call_id,
+            "Language model tool result call_id",
+        )
+        object.__setattr__(self, "output", _freeze_value(self.output))

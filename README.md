@@ -286,6 +286,29 @@ No provider continuation, second model request, or agent loop occurs here.
 Caller composition remains explicit: no agent is automatically wired to this API,
 and conversation handling still rejects model tool calls.
 
+## Provider-neutral model tool result bridge
+
+`ModelToolExecution → ModelToolResultBridge → LanguageModelToolResult` translates
+one successful execution into a provider-neutral result. The result contains only
+the original opaque model/provider `call_id`, taken exactly from
+`execution.tool_call.call_id`, and immutable `output` from
+`execution.result.output`. Containers receive a fresh recursive snapshot using
+the existing model-tool value contract; scalars, including `None`, retain their
+values. The source execution objects remain unchanged.
+
+The model result carries no tool name, execution invocation UUID, or
+provider-specific continuation data.
+EXECUTION INVOCATION ID != MODEL CALL ID.
+EXECUTION TOOL RESULT != MODEL TOOL RESULT.
+MODEL TOOL RESULT != PROVIDER CONTINUATION.
+MODEL TOOL RESULT MUST PRESERVE MODEL CALL CORRELATION.
+
+TUESDAY continues to use `store=False`. A later Responses API continuation layer
+must construct provider-native `function_call_output` correlated by `call_id`;
+stateless/reasoning-capable continuation may also require preserving and replaying
+prior provider output items. This stage neither models nor sends that continuation
+state, serializes output for a provider, or makes a second model request.
+
 ## Tool registry
 
 TUESDAY now has an explicit `ToolRegistry`. Concrete `BaseTool` instances are
