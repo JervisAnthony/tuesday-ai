@@ -346,6 +346,48 @@ Commit 36 exposes explicit provider continuation primitives. It does not connect
 iterate model/tool/model cycles. Each additional continuation requires a caller
 action; no automatic loop, confirmation completion, or composition is added.
 
+## Guarded OpenAI tool turn
+
+`OpenAIToolTurnService(provider, executor, result_bridge)` explicitly composes an
+`OpenAILanguageModelProvider`, `GuardedModelToolExecutor`, and
+`ModelToolResultBridge`. Callers must construct and inject these dependencies;
+the service does not read configuration or create clients, registries, or policies.
+
+`await service.run_once(request)` accepts a `LanguageModelRequest` and performs
+one initial generation through `generate_with_continuation`. A text-only response
+returns immediately. A single model tool call passes through the existing guarded
+executor, then the result bridge, then exactly one provider continuation using a
+one-element tuple of model results. There are zero or one guarded executions and
+zero or one continuation requests per invocation.
+
+The frozen `OpenAIToolTurnResult` retains `initial`, `execution`, `model_result`,
+and `continued` separately. Text-only turns have `None` for the last three fields.
+Tool turns preserve the exact original model call object, its opaque `call_id`,
+and the correlated output; the execution invocation UUID remains separate.
+Initial content and continued content are retained without concatenation.
+
+Authorization remains mandatory inside the guarded pipeline. `ALLOW` may execute;
+`DENY` raises `ToolAuthorizationDeniedError`, and `REQUIRE_CONFIRMATION` raises
+`ToolConfirmationRequiredError` without obtaining or inferring confirmation.
+Unconfigured tools are denied before registry lookup. An explicitly allowed
+unknown tool raises `ToolNotFoundError` at lookup. Authorization and execution
+failures propagate without result bridging or continuation.
+
+Multiple initial calls raise `MultipleModelToolCallsUnsupportedError` before
+invocation bridging, authorization, lookup, or execution. A continuation may
+return further tool calls: its complete response and continuation state remain
+available, but those calls are not executed and no third provider request occurs.
+One tool turn does not enable an automatic agent loop, iteration, retries, or
+fallbacks. Provider, executor, bridge, and continuation failures propagate.
+A continuation failure or invalid continuation result after successful execution
+does not undo tool side effects; this service provides no transactional rollback.
+
+This service introduces no automatic application composition, conversational
+agent wiring, confirmation handling, conversation persistence, or persistent
+execution history. The existing conversational agent still rejects model tool
+calls through its ordinary `generate` path. Tool execution remains outside the
+OpenAI adapter.
+
 ## Tool registry
 
 TUESDAY now has an explicit `ToolRegistry`. Concrete `BaseTool` instances are
