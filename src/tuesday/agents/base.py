@@ -10,6 +10,8 @@ __all__ = ["BaseAgent"]
 class BaseAgent(ABC):
     """An executable component that handles a TUESDAY interaction."""
 
+    __slots__ = ()
+
     @property
     @abstractmethod
     def name(self) -> str:

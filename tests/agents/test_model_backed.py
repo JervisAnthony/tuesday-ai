@@ -416,7 +416,7 @@ def test_agent_retains_only_provider_and_renderer_dependencies() -> None:
 
     run_handle(agent, request, context)
 
-    assert vars(agent) == {}
+    assert not hasattr(agent, "__dict__")
     assert agent._provider is provider
     assert agent._renderer is renderer
 

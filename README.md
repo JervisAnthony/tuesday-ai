@@ -591,6 +591,77 @@ conversation history or per-request state.
 The default application still uses `ConversationalAgent`; model-backed execution
 must be selected explicitly through `create_model_backed_orchestrator(...)`.
 
+## Opt-in guarded OpenAI conversational agent
+
+`GuardedOpenAIConversationalAgent` adapts TUESDAY requests and conversation
+context to the bounded `OpenAIToolTurnService`. Construct it explicitly with an
+already-configured service, a non-empty tuple of exact model-visible
+`LanguageModelToolDefinition` values, and an optional
+`ConversationalPromptRenderer`:
+
+```python
+from tuesday.agents import GuardedOpenAIConversationalAgent
+from tuesday.language_models import LanguageModelToolDefinition
+from tuesday.services.openai_tool_turn import OpenAIToolTurnService
+
+
+def conversational_agent(tool_turn_service: OpenAIToolTurnService):
+    tools = (
+        LanguageModelToolDefinition(
+            name="calculator.basic",
+            description="Perform one basic arithmetic operation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["add", "subtract", "multiply", "divide"],
+                    },
+                    "left": {"type": "number"},
+                    "right": {"type": "number"},
+                },
+                "required": ["operation", "left", "right"],
+                "additionalProperties": False,
+            },
+        ),
+    )
+    return GuardedOpenAIConversationalAgent(tool_turn_service, tools)
+```
+
+The caller supplies the service's provider, registry, authorization policy, and
+guarded execution stack separately. The agent advertises only its configured
+tools, preserving their order and definition objects; it never discovers tools
+or infers permissions. Advertised tools still require guarded authorization.
+The rendered message tuple is preserved in a new model request with that exact
+tools tuple. A renderer that already supplies tools is rejected rather than
+merged. Continuation state must still belong to this exact model request.
+
+Each interaction renders once and calls `run_once` once. Text-only generations
+complete normally. A successful tool turn returns only the final continued model
+text as a correlated `TuesdayResponse`; initial and continued text are never
+concatenated, and raw tool output is not substituted for a model answer.
+
+Further continuation tool calls raise `IncompleteGuardedToolTurnError`, even
+when accompanied by text. The agent does not return a partial answer, call the
+service again, retry, fall back, or run an automatic multi-step model/tool loop.
+Existing provider, scope, authorization, execution, and correlation errors
+propagate unchanged.
+
+An incomplete turn may follow a successful tool execution. Completed tool side
+effects remain: there is no rollback, compensation, transaction management, or
+persistent pending-turn record. Through `StatefulConversationService`, a failed
+or incomplete interaction does not append its user/assistant message pair;
+that persistence behavior does not undo earlier tool side effects.
+
+The agent uses the registry name `conversation`. Callers manually register one
+chosen conversational implementation and explicitly wire the existing router,
+request preparer, and orchestrator. The deterministic and text-only agents and
+both composition factories retain their behavior; neither factory selects this
+agent automatically. This opt-in adapter does not provide an autonomous assistant.
+
+ONE GUARDED TOOL TURN != AUTOMATIC AGENT LOOP.
+UNRESOLVED MODEL TOOL CALLS != COMPLETED ASSISTANT RESPONSE.
+
 ## Configuration
 
 TUESDAY reads its foundational runtime settings from environment variables:
