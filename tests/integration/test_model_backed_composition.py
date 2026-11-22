@@ -346,4 +346,5 @@ def test_public_composition_exports_both_factories() -> None:
         "create_default_orchestrator",
         "create_guarded_openai_orchestrator",
         "create_model_backed_orchestrator",
+        "create_stateful_guarded_openai_service",
     ]
