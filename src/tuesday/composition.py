@@ -7,18 +7,21 @@ from tuesday.agents import (
     GuardedOpenAIConversationalAgent,
     ModelBackedConversationalAgent,
 )
+from tuesday.conversations import BaseConversationRepository
 from tuesday.language_models.base import BaseLanguageModelProvider
 from tuesday.language_models.tools import LanguageModelToolDefinition
 from tuesday.orchestration import TuesdayOrchestrator
 from tuesday.preparation import DirectiveRequestPreparer
 from tuesday.prompting import ConversationalPromptRenderer
 from tuesday.routing import DeterministicRouter
+from tuesday.services.conversation import StatefulConversationService
 from tuesday.services.openai_tool_turn import OpenAIToolTurnService
 
 __all__ = [
     "create_default_orchestrator",
     "create_guarded_openai_orchestrator",
     "create_model_backed_orchestrator",
+    "create_stateful_guarded_openai_service",
 ]
 
 
@@ -74,3 +77,19 @@ def create_model_backed_orchestrator(
         renderer=renderer,
     )
     return _compose_conversational_orchestrator(conversational_agent)
+
+
+def create_stateful_guarded_openai_service(
+    tool_turn_service: OpenAIToolTurnService,
+    tools: tuple[LanguageModelToolDefinition, ...],
+    repository: BaseConversationRepository,
+    *,
+    renderer: ConversationalPromptRenderer | None = None,
+) -> StatefulConversationService:
+    """Compose guarded conversations using the caller's existing repository."""
+    orchestrator = create_guarded_openai_orchestrator(
+        tool_turn_service,
+        tools,
+        renderer=renderer,
+    )
+    return StatefulConversationService(orchestrator, repository)

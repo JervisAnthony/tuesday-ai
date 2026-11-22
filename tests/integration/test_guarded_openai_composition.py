@@ -581,6 +581,7 @@ def test_new_factory_is_public_and_only_delegates_to_agent_and_shared_helper():
         "create_default_orchestrator",
         "create_guarded_openai_orchestrator",
         "create_model_backed_orchestrator",
+        "create_stateful_guarded_openai_service",
     ]
     tree = ast.parse(inspect.getsource(create_guarded_openai_orchestrator))
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
@@ -600,12 +601,14 @@ def test_new_factory_is_public_and_only_delegates_to_agent_and_shared_helper():
     }
     assert imports == {
         "tuesday.agents",
+        "tuesday.conversations",
         "tuesday.language_models.base",
         "tuesday.language_models.tools",
         "tuesday.orchestration",
         "tuesday.preparation",
         "tuesday.prompting",
         "tuesday.routing",
+        "tuesday.services.conversation",
         "tuesday.services.openai_tool_turn",
     }
 

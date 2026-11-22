@@ -208,6 +208,82 @@ message preserves the original incoming request content exactly, including any
 routing directive. Repository and orchestration failures propagate unchanged;
 there is no retry, rollback, or persistence fallback in this layer.
 
+## Stateful guarded OpenAI conversation composition
+
+`create_stateful_guarded_openai_service` combines the existing guarded
+orchestrator factory and `StatefulConversationService` with a caller-supplied
+`BaseConversationRepository`. Configure `tool_turn_service` and the non-empty
+model-visible `tools` tuple separately, then choose a repository explicitly:
+
+```python
+import asyncio
+from uuid import uuid4
+
+from tuesday.composition import create_stateful_guarded_openai_service
+from tuesday.conversations import InMemoryConversationRepository
+from tuesday.domain import TuesdayRequest
+
+repository = InMemoryConversationRepository()
+service = create_stateful_guarded_openai_service(
+    tool_turn_service,
+    tools,
+    repository,
+)
+conversation_id = uuid4()
+
+
+async def conversation():
+    first = await service.handle(
+        TuesdayRequest("/chat Hello TUESDAY", conversation_id=conversation_id)
+    )
+    second = await service.handle(
+        TuesdayRequest(
+            "/conversation What did I say earlier?",
+            conversation_id=conversation_id,
+        )
+    )
+    return first, second
+
+
+first, second = asyncio.run(conversation())
+```
+
+An optional `renderer=renderer` preserves an existing custom
+`ConversationalPromptRenderer`. Construction performs no model execution,
+authorization, repository reads, or writes, and creates no persistence backend.
+All three existing orchestrator factories retain their behavior.
+
+Each explicit `handle` call loads the current history before interaction and
+appends one original user message followed by one final assistant message only
+after a successful, completed response. Stored user messages retain their
+routing directives. Earlier messages pass through unchanged; only the current
+request has its leading `/chat` or `/conversation` directive removed before
+rendering. Responses preserve the request's conversation and request IDs.
+Reusing a conversation ID reuses its history; distinct IDs keep histories
+isolated. The in-memory repository shown here is process-local, not permanent
+storage. Repository selection always belongs to the caller.
+
+Tool advertisement still requires guarded authorization. Unadvertised tools,
+denials, confirmation requirements, multiple initial calls, and unresolved
+continuations fail closed without appending a successful pair. Existing history
+remains intact. Initial provider and execution failures also prevent appending;
+repository read failures prevent execution. An append failure after completion
+propagates without retrying the model or tool.
+
+There is no automatic agent loop, retry, rollback, or incomplete-turn recovery.
+A failed continuation or append can follow a completed tool execution; withheld
+conversation persistence does not undo tool side effects. This factory provides
+no built-in concurrency control, request idempotency, exactly-once side effects,
+or transaction isolation. Callers must handle concurrency and side-effect
+recovery at higher layers when those guarantees are needed.
+
+EXPLICIT REPOSITORY != AUTOMATIC PERSISTENCE BACKEND.
+FAILED INTERACTION != SUCCESSFUL PERSISTED CONVERSATION TURN.
+CONVERSATION PERSISTENCE != TOOL SIDE-EFFECT ROLLBACK.
+SAME CONVERSATION_ID REUSES HISTORY.
+DIFFERENT CONVERSATION_ID MUST NOT SHARE HISTORY.
+STATEFUL FACTORY != TRANSACTION OR IDEMPOTENCY MANAGER.
+
 ## Tool execution contracts
 
 TUESDAY now includes provider- and integration-neutral contracts for future
