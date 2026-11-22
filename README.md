@@ -94,6 +94,49 @@ print(response.content)
 This path remains explicit by design: configuring model settings alone does not
 change the default application or trigger provider execution.
 
+## Guarded OpenAI application composition
+
+`create_guarded_openai_orchestrator(tool_turn_service, tools, renderer=None)`
+returns a `TuesdayOrchestrator` with one `GuardedOpenAIConversationalAgent`.
+This factory is explicitly opt-in: construct the `OpenAIToolTurnService` and
+non-empty tuple of `LanguageModelToolDefinition` objects separately, then pass
+those exact dependencies to the factory:
+
+```python
+from tuesday.composition import create_guarded_openai_orchestrator
+
+orchestrator = create_guarded_openai_orchestrator(
+    tool_turn_service,
+    tools,
+)
+```
+
+Pass an existing `ConversationalPromptRenderer` with `renderer=renderer` to
+use a custom system prompt; omitting it retains the agent's default renderer.
+The factory preserves the supplied service, tools tuple, definition objects,
+and optional renderer by identity. Validation remains in the guarded agent.
+
+The shared composition helper creates a fresh agent registry, deterministic
+router, and directive request preparer. Both `/chat` and `/conversation` select
+the guarded agent. Existing directive handling removes the route before prompt
+rendering while preserving the original request and its correlation IDs.
+
+The caller remains responsible for OpenAI clients, concrete tool registration,
+and authorization policies. The factory constructs none of these, reads no
+environment configuration, and does not discover or expand advertised tools.
+Advertisement still requires guarded authorization before execution.
+Construction alone does not execute a model or tool, and neither existing
+factory automatically enables guarded execution. `create_default_orchestrator`
+remains deterministic; `create_model_backed_orchestrator` remains text-only.
+
+Each interaction remains bounded to one initial generation, at most one guarded
+execution, and at most one continuation. Further tool calls fail closed through
+the guarded agent. There are no automatic multi-step loops, retries, or fallbacks.
+The factory adds application wiring rather than autonomous execution.
+
+EXPLICIT COMPOSITION != AUTOMATIC MODEL EXECUTION.
+EXISTING DEFAULT COMPOSITION MUST REMAIN DETERMINISTIC.
+
 ## Conversation history repository
 
 TUESDAY now includes an asynchronous `BaseConversationRepository` boundary for
@@ -653,11 +696,12 @@ persistent pending-turn record. Through `StatefulConversationService`, a failed
 or incomplete interaction does not append its user/assistant message pair;
 that persistence behavior does not undo earlier tool side effects.
 
-The agent uses the registry name `conversation`. Callers manually register one
-chosen conversational implementation and explicitly wire the existing router,
-request preparer, and orchestrator. The deterministic and text-only agents and
-both composition factories retain their behavior; neither factory selects this
-agent automatically. This opt-in adapter does not provide an autonomous assistant.
+The agent uses the registry name `conversation`. Callers can select it through
+`create_guarded_openai_orchestrator` or manually wire one chosen conversational
+implementation into the existing registry, router, request preparer, and
+orchestrator. The deterministic and text-only agents and their composition
+factories retain their behavior; neither existing factory selects this agent
+automatically. This opt-in adapter does not provide an autonomous assistant.
 
 ONE GUARDED TOOL TURN != AUTOMATIC AGENT LOOP.
 UNRESOLVED MODEL TOOL CALLS != COMPLETED ASSISTANT RESPONSE.

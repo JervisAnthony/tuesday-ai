@@ -344,5 +344,6 @@ def test_composition_module_remains_provider_neutral() -> None:
 def test_public_composition_exports_both_factories() -> None:
     assert composition_module.__all__ == [
         "create_default_orchestrator",
+        "create_guarded_openai_orchestrator",
         "create_model_backed_orchestrator",
     ]
