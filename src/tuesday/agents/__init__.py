@@ -12,12 +12,21 @@ from tuesday.agents.registry import (
     AgentRegistry,
 )
 
+# Initialize AgentRegistry before the guarded agent imports the services package.
+# isort: split
+from tuesday.agents.guarded_openai import (
+    GuardedOpenAIConversationalAgent,
+    IncompleteGuardedToolTurnError,
+)
+
 __all__ = [
     "AgentNotFoundError",
     "AgentRegistrationError",
     "AgentRegistry",
     "BaseAgent",
     "ConversationalAgent",
+    "GuardedOpenAIConversationalAgent",
+    "IncompleteGuardedToolTurnError",
     "ModelBackedConversationalAgent",
     "UnsupportedModelToolCallError",
 ]
