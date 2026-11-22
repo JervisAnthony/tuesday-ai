@@ -5,6 +5,7 @@ from tuesday.services.openai_tool_turn import (
     MultipleModelToolCallsUnsupportedError,
     OpenAIToolTurnResult,
     OpenAIToolTurnService,
+    UnadvertisedModelToolCallError,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "OpenAIToolTurnResult",
     "OpenAIToolTurnService",
     "StatefulConversationService",
+    "UnadvertisedModelToolCallError",
 ]

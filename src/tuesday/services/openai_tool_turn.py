@@ -20,6 +20,10 @@ class MultipleModelToolCallsUnsupportedError(RuntimeError):
     """Raised when a bounded tool turn receives multiple initial calls."""
 
 
+class UnadvertisedModelToolCallError(RuntimeError):
+    """Raised when a model requests a tool absent from its request scope."""
+
+
 def _validate_execution(
     execution: ModelToolExecution,
     tool_call: LanguageModelToolCall,
@@ -122,6 +126,15 @@ class OpenAIToolTurnService:
             return OpenAIToolTurnResult(initial, None, None, None)
 
         tool_call = tool_calls[0]
+        if initial.continuation.request is not request:
+            raise ValueError(
+                "OpenAI continuation state request must match the original tool turn "
+                "request."
+            )
+        if not any(definition.name == tool_call.name for definition in request.tools):
+            raise UnadvertisedModelToolCallError(
+                "Model requested a tool that was not advertised for this request."
+            )
         execution = await self._executor.execute(tool_call)
         _validate_execution(execution, tool_call)
         model_result = self._result_bridge.to_model_result(execution)

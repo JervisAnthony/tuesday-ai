@@ -355,10 +355,28 @@ the service does not read configuration or create clients, registries, or polici
 
 `await service.run_once(request)` accepts a `LanguageModelRequest` and performs
 one initial generation through `generate_with_continuation`. A text-only response
-returns immediately. A single model tool call passes through the existing guarded
-executor, then the result bridge, then exactly one provider continuation using a
-one-element tuple of model results. There are zero or one guarded executions and
-zero or one continuation requests per invocation.
+returns immediately, including when `request.tools` is empty, without inspecting
+continuation state. A single model tool call requires three separate checks:
+
+1. Its exact name must appear in the original `request.tools` definitions.
+2. Continuation state must reference that exact original request object.
+3. The existing guarded authorization path must permit execution.
+
+Before invoking the guarded executor, the service first checks request identity
+using `initial.continuation.request is request`, then checks tool exposure by
+exact, case-sensitive name. An equal but distinct request fails with `ValueError`;
+the service does not copy or repair continuation state. An unadvertised name
+raises `UnadvertisedModelToolCallError`, even when the tool is registered and
+explicitly allowed by policy. Empty `request.tools` rejects every initial tool
+call. Names receive no aliases, wildcard matching, or normalization. These errors
+occur before invocation creation, authorization, lookup, execution, result
+bridging, or provider continuation.
+
+An in-scope call passes through the existing guarded executor, then the result
+bridge, then exactly one provider continuation using a one-element tuple of model
+results. There are zero or one guarded executions and zero or one continuation
+requests per invocation. These checks do not implement a complete identity or
+RBAC system.
 
 The frozen `OpenAIToolTurnResult` retains `initial`, `execution`, `model_result`,
 and `continued` separately. Text-only turns have `None` for the last three fields.
@@ -370,8 +388,8 @@ Authorization remains mandatory inside the guarded pipeline. `ALLOW` may execute
 `DENY` raises `ToolAuthorizationDeniedError`, and `REQUIRE_CONFIRMATION` raises
 `ToolConfirmationRequiredError` without obtaining or inferring confirmation.
 Unconfigured tools are denied before registry lookup. An explicitly allowed
-unknown tool raises `ToolNotFoundError` at lookup. Authorization and execution
-failures propagate without result bridging or continuation.
+advertised unknown tool raises `ToolNotFoundError` at lookup. Authorization and
+execution failures propagate without result bridging or continuation.
 
 Multiple initial calls raise `MultipleModelToolCallsUnsupportedError` before
 invocation bridging, authorization, lookup, or execution. A continuation may
@@ -387,6 +405,16 @@ agent wiring, confirmation handling, conversation persistence, or persistent
 execution history. The existing conversational agent still rejects model tool
 calls through its ordinary `generate` path. Tool execution remains outside the
 OpenAI adapter.
+
+MODEL TOOL CALL MUST BE WITHIN THE REQUEST'S ADVERTISED TOOL SCOPE.
+ADVERTISED TOOL != AUTHORIZED TOOL.
+AUTHORIZED TOOL != EXECUTED TOOL.
+REQUEST CONTINUATION STATE MUST BELONG TO THE ORIGINAL REQUEST.
+MODEL CALL ID != EXECUTION INVOCATION ID.
+MODEL TOOL EXECUTION MUST PASS THROUGH AUTHORIZATION.
+REQUIRE CONFIRMATION != CONFIRMATION RECEIVED.
+MODEL TOOL RESULT != PROVIDER CONTINUATION.
+ONE TOOL TURN != AUTOMATIC AGENT LOOP.
 
 ## Tool registry
 
