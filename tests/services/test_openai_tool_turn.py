@@ -38,6 +38,7 @@ from tuesday.services import (
     MultipleModelToolCallsUnsupportedError,
     OpenAIToolTurnResult,
     OpenAIToolTurnService,
+    UnadvertisedModelToolCallError,
 )
 from tuesday.tools import (
     BasicCalculatorTool,
@@ -83,11 +84,11 @@ def raw(*items, text=None):
     return SimpleNamespace(output=items, output_text=text, model="resolved-model")
 
 
-def generation(*calls, text=None):
+def generation(*calls, text=None, original_request=None):
     response = LanguageModelResponse(text, "openai", "resolved-model", calls)
     state = (
         OpenAIContinuationState(
-            request(),
+            request() if original_request is None else original_request,
             "configured-model",
             None,
             ("{}",),
@@ -333,7 +334,7 @@ def test_text_only_path_calls_only_initial_generation(stack, stubbed):
     expected = generation(text="Hello")
     if stubbed:
         stack.spies["initial"].return_value = expected
-    original = request()
+    original = replace(request(), tools=())
     result = run(stack, original)
     stack.spies["initial"].assert_awaited_once_with(original)
     if stubbed:
@@ -353,7 +354,7 @@ def test_service_retains_exact_objects_returned_by_each_boundary(stack):
     stack.spies["execution"].return_value = values["execution"]
     stack.spies["result"].return_value = values["model_result"]
     stack.spies["continued"].return_value = values["continued"]
-    result = run(stack)
+    result = run(stack, values["initial"].continuation.request)
     for name, value in values.items():
         assert getattr(result, name) is value
     assert_stopped(stack, ["initial", "execution", "result", "continued"])
@@ -367,6 +368,7 @@ def test_real_calculator_turn_and_exact_guarded_call_order(stack, mixed):
     original = request()
     result = run(stack, original)
     assert result.initial.response.content == content
+    assert result.initial.continuation.request is original
     assert result.continued.response.content == "The result is 42."
     assert result.continued.continuation is None
     call = result.initial.response.tool_calls[0]
@@ -424,6 +426,101 @@ def test_multiple_initial_calls_rejected_before_invocation_or_authorization(stac
 
 
 @pytest.mark.parametrize(
+    "advertised_names,returned_name",
+    [
+        ((), "calculator.basic"),
+        (("other.tool",), "calculator.basic"),
+        (("calculator.basic",), "unknown.tool"),
+        (("calculator.basic",), "Calculator.Basic"),
+        (("calculator.basic",), "CALCULATOR.BASIC"),
+        (("calculator.basic.*",), "calculator.basic"),
+        (("calculator",), "calculator.basic"),
+    ],
+)
+def test_unadvertised_tools_stop_before_all_execution_boundaries(
+    stack, advertised_names, returned_name
+):
+    original = replace(
+        request(),
+        tools=tuple(
+            LanguageModelToolDefinition(name, "Arithmetic", {"type": "object"})
+            for name in advertised_names
+        ),
+    )
+    stack.create.side_effect = [raw(function(name=returned_name))]
+    with pytest.raises(UnadvertisedModelToolCallError) as caught:
+        run(stack, original)
+    assert str(caught.value) == (
+        "Model requested a tool that was not advertised for this request."
+    )
+    stack.spies["initial"].assert_awaited_once_with(original)
+    stack.create.assert_awaited_once()
+    stack.factory.assert_not_called()
+    for name in (
+        "execution", "invocation", "authorize", "lookup", "tool", "result", "continued"
+    ):
+        stack.spies[name].assert_not_called()
+    assert_stopped(stack, ["initial"])
+
+
+@pytest.mark.parametrize("equal_request", [False, True])
+@pytest.mark.parametrize("advertised", [False, True])
+def test_continuation_requires_original_request_identity_before_scope_or_execution(
+    stack, equal_request, advertised
+):
+    original = request() if advertised else replace(request(), tools=())
+    other = replace(original)
+    if not equal_request:
+        other = replace(
+            other, messages=(LanguageModelMessage(MessageRole.USER, "Other request"),)
+        )
+    assert (original == other) is equal_request
+    assert original is not other
+    call = LanguageModelToolCall("call_calc_1", "calculator.basic", ARGUMENTS)
+    initial = generation(call, original_request=other)
+    stack.spies["initial"].return_value = initial
+    with pytest.raises(ValueError) as caught:
+        run(stack, original)
+    assert str(caught.value) == (
+        "OpenAI continuation state request must match the original tool turn request."
+    )
+    assert initial.continuation.request is other
+    stack.spies["initial"].assert_awaited_once_with(original)
+    stack.factory.assert_not_called()
+    assert_stopped(stack, ["initial"])
+
+
+def test_multiple_calls_take_precedence_over_request_identity_and_scope(stack):
+    calls = (
+        LanguageModelToolCall("call_a", "calculator.basic", ARGUMENTS),
+        LanguageModelToolCall("call_b", "unknown.tool", ARGUMENTS),
+    )
+    stack.spies["initial"].return_value = generation(*calls)
+    with pytest.raises(MultipleModelToolCallsUnsupportedError) as caught:
+        run(stack, replace(request(), tools=()))
+    assert str(caught.value) == "OpenAI tool turn supports at most one model tool call."
+    stack.spies["initial"].assert_awaited_once()
+    stack.factory.assert_not_called()
+    assert_stopped(stack, ["initial"])
+
+
+def test_exact_advertised_name_can_follow_other_definitions(stack):
+    original = request()
+    original = replace(
+        original,
+        tools=(LanguageModelToolDefinition("other.tool", "Other", {}),)
+        + original.tools,
+    )
+    result = run(stack, original)
+    assert result.initial.continuation.request is original
+    assert result.execution.result.output == 42
+    stack.spies["authorize"].assert_awaited_once()
+    stack.spies["tool"].assert_awaited_once()
+    stack.spies["continued"].assert_awaited_once()
+    assert stack.create.await_count == 2
+
+
+@pytest.mark.parametrize(
     "outcome,error_type",
     [
         (ToolAuthorizationOutcome.DENY, ToolAuthorizationDeniedError),
@@ -468,7 +565,13 @@ def test_explicitly_allowed_unknown_tool_authorizes_before_failed_lookup(stack):
 
     stack.spies["authorize"].side_effect = authorize
     with pytest.raises(ToolNotFoundError):
-        run(stack)
+        run(
+            stack,
+            replace(
+                request(),
+                tools=(LanguageModelToolDefinition("unknown.tool", "Unknown", {}),),
+            ),
+        )
     stack.create.assert_awaited_once()
     stack.spies["lookup"].assert_called_once_with("unknown.tool")
     assert_stopped(stack, ["initial", "execution", "invocation", "authorize", "lookup"])
@@ -512,14 +615,15 @@ def test_further_continued_tool_calls_remain_visible_without_execution(stack, co
 @pytest.mark.parametrize("invalid", [None, {}, object(), "execution", "equal call"])
 def test_invalid_or_unrelated_execution_stops_before_result_bridge(stack, invalid):
     call = LanguageModelToolCall("call_calc_1", "calculator.basic", ARGUMENTS)
-    stack.spies["initial"].return_value = generation(call)
+    original = request()
+    stack.spies["initial"].return_value = generation(call, original_request=original)
     if invalid == "equal call":
         invalid = execution_for(replace(call))
     stack.spies["execution"].return_value = invalid
     with pytest.raises(
         ValueError if isinstance(invalid, ModelToolExecution) else TypeError
     ):
-        run(stack)
+        run(stack, original)
     assert_stopped(stack, ["initial", "execution"])
 
 
@@ -629,8 +733,9 @@ def test_exact_public_exports_preserve_stateful_service():
         "OpenAIToolTurnResult",
         "OpenAIToolTurnService",
         "StatefulConversationService",
+        "UnadvertisedModelToolCallError",
     ]
-    for name in services.__all__[:3]:
+    for name in services.__all__[:3] + ["UnadvertisedModelToolCallError"]:
         assert getattr(services, name) is getattr(turn_module, name)
     assert (
         services.StatefulConversationService.__module__
