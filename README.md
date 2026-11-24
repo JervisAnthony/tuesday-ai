@@ -169,6 +169,79 @@ context = asyncio.run(repository.get_context(conversation_id))
 The in-memory repository is process-local and intentionally has no database,
 filesystem, model-provider, routing, or orchestration dependency.
 
+## SQLite conversation history repository
+
+`SQLiteConversationRepository` implements the same asynchronous repository
+contract using Python's standard-library `sqlite3`, with no third-party database
+dependency. Select a file-backed database explicitly:
+
+```python
+from pathlib import Path
+
+from tuesday.composition import create_stateful_guarded_openai_service
+from tuesday.conversations import SQLiteConversationRepository
+
+repository = SQLiteConversationRepository(
+    Path("/caller-selected/location/conversations.sqlite3")
+)
+service = create_stateful_guarded_openai_service(
+    tool_turn_service,
+    tools,
+    repository,
+)
+```
+
+Replace the example path with a suitable location whose parent directory already
+exists. The caller owns database selection; missing parent directories are not
+created. Strings and `Path` values are accepted, while SQLite `:memory:` and
+caller-supplied file URIs are rejected. The path is resolved once so later working
+directory changes do not redirect storage. Importing the package creates no
+database. Construction synchronously initializes the conversation table and its
+conversation/sequence index in one transaction, preserving existing records,
+unrelated tables, and the database's `user_version`. Incompatible schemas surface
+an error; there is no migration framework or automatic database replacement.
+
+Reads and appends run through `asyncio.to_thread`. Each operation creates, uses,
+and closes its own connection in the owning thread, with a five-second SQLite
+lock timeout. Ordinary operations require the initialized file to exist, so a
+deleted database is not silently recreated. Expected SQLite and malformed stored
+data errors raise `ConversationRepositoryError` with the original cause; invalid
+caller inputs raise `TypeError` or `ValueError`. Failed operations are not retried.
+
+Snapshots reconstruct immutable domain messages with the original UUIDs, roles,
+exact content, and ISO 8601 timestamps, preserving represented instants, offsets,
+and microseconds. Named timezone objects and Python object identities are not
+preserved. History follows database append sequence, including within each batch,
+regardless of timestamps. Duplicate message IDs are retained. Unknown
+conversations return empty contexts, and different conversation IDs remain
+isolated. Reopening the same file recovers committed history; separate files keep
+independent histories.
+
+An append validates and serializes the entire batch before writing, acquires a
+write transaction with `BEGIN IMMEDIATE`, inserts in supplied order, and reads the
+resulting snapshot before committing. A failed batch rolls back all its inserts
+and preserves earlier committed history. Concurrent successful appends retain
+each complete batch contiguously; their acquisition order is unspecified.
+
+Existing stateful services and factories accept this repository unchanged. The
+in-memory implementation remains available and no backend activates
+automatically. An explicitly supplied `ConversationalPromptRenderer` with
+`max_history_messages=2` or zero bounds only model input: SQLite retains every
+successfully persisted message, including original user routing directives.
+
+Database files can contain sensitive conversation history. Choose a protected
+storage location and manage file permissions and backups. This backend adds no
+encryption-at-rest feature, backup or retention scheduler, request deduplication,
+or exactly-once tool execution. Durability relies on SQLite's ordinary transaction
+guarantees; it does not promise protection from disk failure or corruption.
+
+Atomic message batches do not coordinate complete conversation turns or roll back
+external tools. A tool can execute before a later append fails. Concurrent service
+turns can use overlapping history snapshots, and cancelling an awaiting caller
+does not necessarily interrupt an already-running database worker or transaction.
+No automatic cancellation rollback or request-level exactly-once persistence is
+provided.
+
 ## Stateful conversation service
 
 `StatefulConversationService` owns the application-level interaction lifecycle

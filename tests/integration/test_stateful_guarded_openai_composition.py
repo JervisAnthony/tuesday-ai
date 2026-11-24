@@ -4,8 +4,10 @@ import ast
 import asyncio
 import inspect
 import json
+import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -39,6 +41,7 @@ from tuesday.conversations import (
     BaseConversationRepository,
     ConversationRepositoryError,
     InMemoryConversationRepository,
+    SQLiteConversationRepository,
 )
 from tuesday.domain import (
     ConversationContext,
@@ -190,6 +193,216 @@ def establish_history(stack):
     stack.events.reset_mock()
     stack.create.reset_mock()
     return request, before
+
+
+@pytest.fixture
+def sqlite_stack(stack, tmp_path):
+    """Reuse the existing guarded stack with an explicitly selected durable backend."""
+    stack.database_path = tmp_path / "history.sqlite3"
+    stack.repository = SQLiteConversationRepository(stack.database_path)
+    stack.read = stack.repository.get_context
+    stack.stateful = create_stateful_guarded_openai_service(
+        stack.tool_turn, TOOLS, stack.repository
+    )
+    return stack
+
+
+@pytest.mark.parametrize("limit", [None, 0, 2])
+def test_sqlite_recreated_services_recover_full_history_with_opt_in_prompt_limits(
+    sqlite_stack, limit
+):
+    stack = sqlite_stack
+    renderer = ConversationalPromptRenderer(
+        "Custom durable system prompt", max_history_messages=limit
+    )
+    conversation_id = uuid4()
+    expected = []
+    stack.create.side_effect = [
+        raw(text=f"  Answer {index}\nline two  ") for index in range(4)
+    ]
+    for index in range(4):
+        repository = SQLiteConversationRepository(stack.database_path)
+        stack.stateful = create_stateful_guarded_openai_service(
+            stack.tool_turn, TOOLS, repository, renderer=renderer
+        )
+        assert stack.stateful._repository is repository
+        agent = stack.stateful._orchestrator._registry.get("conversation")
+        assert agent._renderer is renderer
+        recovered = asyncio.run(repository.get_context(conversation_id))
+        assert message_values(recovered) == expected
+        request = TuesdayRequest(f"/conversation Question {index}", conversation_id)
+        response = handle(stack, request)
+        assert_correlated(response, request)
+        assert response.content == f"  Answer {index}\nline two  "
+        prior = expected if limit is None else [] if limit == 0 else expected[-2:]
+        assert stack.create.call_args.kwargs["input"] == [
+            {"role": "system", "content": renderer.system_prompt},
+            *({"role": role.value, "content": content} for role, content in prior),
+            {"role": "user", "content": f"Question {index}"},
+        ]
+        expected.extend(
+            [(MessageRole.USER, request.content),
+             (MessageRole.ASSISTANT, response.content)]
+        )
+        reopened = SQLiteConversationRepository(stack.database_path)
+        saved = asyncio.run(reopened.get_context(conversation_id))
+        assert message_values(saved) == expected
+        assert len(saved.messages) == 2 * (index + 1)
+    assert len(saved.messages) == 8
+    assert stack.create.await_count == 4
+    stack.spies["tool"].assert_not_awaited()
+    stack.spies["continued"].assert_not_awaited()
+
+
+def test_sqlite_repository_works_with_existing_deterministic_stateful_service(
+    sqlite_stack,
+):
+    repository = sqlite_stack.repository
+    service = StatefulConversationService(create_default_orchestrator(), repository)
+    request = TuesdayRequest("/chat Hello durable TUESDAY")
+    response = asyncio.run(service.handle(request))
+    assert_correlated(response, request)
+    saved = asyncio.run(repository.get_context(request.conversation_id))
+    assert message_values(saved) == [
+        (MessageRole.USER, request.content), (MessageRole.ASSISTANT, response.content)
+    ]
+    sqlite_stack.create.assert_not_awaited()
+
+
+def test_sqlite_calculator_completion_survives_repository_and_service_restart(
+    sqlite_stack,
+):
+    stack = sqlite_stack
+    item = function("call_sqlite_43")
+    stack.create.side_effect = [raw(item), raw(text="The result is 42.")]
+    first = TuesdayRequest("/chat What is 6 times 7?")
+    response = handle(stack, first)
+    assert_correlated(response, first)
+    assert response.content == "The result is 42."
+    for name in ("execution", "authorize", "tool", "continued"):
+        stack.spies[name].assert_awaited_once()
+    stack.factory.assert_called_once_with()
+    execution = stack.spies["result"].call_args.args[0]
+    assert execution.result.output == 42
+    assert execution.tool_call.call_id == "call_sqlite_43"
+    assert execution.invocation.invocation_id is INVOCATION_ID
+    assert str(INVOCATION_ID) != execution.tool_call.call_id
+    stack.spies["authorize"].assert_awaited_once_with(execution.invocation)
+    state, results = stack.spies["continued"].call_args.args
+    assert state.request is stack.spies["turn"].call_args.args[0]
+    assert state.request.tools is TOOLS
+    assert results[0].call_id == item.call_id
+    assert results[0].output == 42
+    initial, continued = [call.kwargs for call in stack.create.call_args_list]
+    assert [tool["name"] for tool in initial["tools"]] == ["calculator.basic"]
+    assert continued["tools"] == initial["tools"]
+    assert continued["input"] == initial["input"] + [
+        item.model_dump(mode="json", exclude_none=True),
+        {"type": "function_call_output", "call_id": item.call_id, "output": "42"},
+    ]
+    before = asyncio.run(stack.read(first.conversation_id))
+    assert message_values(before) == [
+        (MessageRole.USER, first.content), (MessageRole.ASSISTANT, response.content)
+    ]
+    recreated = SQLiteConversationRepository(stack.database_path)
+    stack.stateful = create_stateful_guarded_openai_service(
+        stack.tool_turn, TOOLS, recreated
+    )
+    second = TuesdayRequest("/conversation What was the result?", first.conversation_id)
+    stack.create.side_effect = [raw(text="It was 42.")]
+    reply = handle(stack, second)
+    assert_correlated(reply, second)
+    assert reply.content == "It was 42."
+    assert stack.create.call_args.kwargs["input"] == [
+        {"role": "system", "content": DEFAULT_CONVERSATIONAL_SYSTEM_PROMPT},
+        {"role": "user", "content": first.content},
+        {"role": "assistant", "content": response.content},
+        {"role": "user", "content": "What was the result?"},
+    ]
+    saved = asyncio.run(recreated.get_context(first.conversation_id))
+    assert saved.messages[:2] == before.messages
+    assert message_values(saved) == message_values(before) + [
+        (MessageRole.USER, second.content), (MessageRole.ASSISTANT, reply.content)
+    ]
+    assert len(saved.messages) == 4
+    assert stack.create.await_count == 3
+    stack.spies["tool"].assert_awaited_once()
+    stack.spies["continued"].assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "failure,outcome,error_type",
+    [
+        ("deny", ToolAuthorizationOutcome.DENY, ToolAuthorizationDeniedError),
+        (
+            "confirmation", ToolAuthorizationOutcome.REQUIRE_CONFIRMATION,
+            ToolConfirmationRequiredError,
+        ),
+        (
+            "unadvertised", ToolAuthorizationOutcome.ALLOW,
+            UnadvertisedModelToolCallError,
+        ),
+        (
+            "multiple", ToolAuthorizationOutcome.ALLOW,
+            MultipleModelToolCallsUnsupportedError,
+        ),
+        ("incomplete", ToolAuthorizationOutcome.ALLOW, IncompleteGuardedToolTurnError),
+    ],
+)
+def test_sqlite_guarded_failures_preserve_only_previously_committed_history(
+    sqlite_stack, failure, error_type
+):
+    stack = sqlite_stack
+    first, before = establish_history(stack)
+    if failure == "unadvertised":
+        stack.create.side_effect = [raw(function(name="unknown.tool"))]
+    elif failure == "multiple":
+        stack.create.side_effect = [raw(function(), function("call_second"))]
+    elif failure == "incomplete":
+        stack.create.side_effect = [raw(function()), raw(function("call_more"))]
+    else:
+        stack.create.side_effect = [raw(function())]
+    request = TuesdayRequest("/chat Attempt another operation", first.conversation_id)
+    with pytest.raises(error_type):
+        handle(stack, request)
+    reopened = SQLiteConversationRepository(stack.database_path)
+    assert asyncio.run(reopened.get_context(first.conversation_id)) == before
+    assert stack.create.await_count == (2 if failure == "incomplete" else 1)
+    if failure == "incomplete":
+        stack.spies["tool"].assert_awaited_once()
+        stack.spies["continued"].assert_awaited_once()
+    else:
+        stack.spies["tool"].assert_not_awaited()
+        stack.spies["continued"].assert_not_awaited()
+    if failure in ("unadvertised", "multiple"):
+        stack.spies["authorize"].assert_not_awaited()
+
+
+def test_sqlite_append_failure_after_calculator_rolls_back_without_execution_retry(
+    sqlite_stack,
+):
+    stack = sqlite_stack
+    first, before = establish_history(stack)
+    with closing(sqlite3.connect(stack.database_path)) as connection:
+        connection.execute("""
+            CREATE TRIGGER reject_completed_reply BEFORE INSERT
+            ON tuesday_conversation_messages WHEN NEW.content = 'The result is 42.'
+            BEGIN SELECT RAISE(ABORT, 'Cannot append completed reply'); END
+        """)
+    stack.create.side_effect = [
+        raw(function("call_sqlite_43")), raw(text="The result is 42.")
+    ]
+    request = TuesdayRequest("/chat What is 6 times 7?", first.conversation_id)
+    with pytest.raises(ConversationRepositoryError) as caught:
+        handle(stack, request)
+    assert isinstance(caught.value.__cause__, sqlite3.IntegrityError)
+    stack.spies["tool"].assert_awaited_once()
+    stack.spies["authorize"].assert_awaited_once()
+    stack.spies["continued"].assert_awaited_once()
+    assert stack.create.await_count == 2
+    assert stack.spies["result"].call_args.args[0].result.output == 42
+    reopened = SQLiteConversationRepository(stack.database_path)
+    assert asyncio.run(reopened.get_context(first.conversation_id)) == before
 
 
 def test_factory_contract_identity_and_side_effect_free_construction(stack):
