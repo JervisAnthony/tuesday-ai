@@ -2,9 +2,9 @@
 
 import ast
 import inspect
-from dataclasses import FrozenInstanceError, fields
-from datetime import UTC, datetime
-from uuid import uuid4
+from dataclasses import FrozenInstanceError, fields, replace
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -60,35 +60,42 @@ def test_custom_system_prompt_is_preserved_exactly() -> None:
 
 
 @pytest.mark.parametrize("prompt", ["", "   ", "\t\n"])
-def test_empty_or_whitespace_system_prompt_is_rejected(prompt: str) -> None:
+@pytest.mark.parametrize("limit", [None, 0, 1])
+def test_empty_or_whitespace_system_prompt_is_rejected(prompt: str, limit) -> None:
     with pytest.raises(ValueError, match="system prompt must not be empty"):
-        ConversationalPromptRenderer(system_prompt=prompt)
+        ConversationalPromptRenderer(system_prompt=prompt, max_history_messages=limit)
 
 
 @pytest.mark.parametrize("prompt", [None, 42, object()])
-def test_non_string_system_prompt_is_rejected(prompt: object) -> None:
+@pytest.mark.parametrize("limit", [None, 0, 1])
+def test_non_string_system_prompt_is_rejected(prompt: object, limit) -> None:
     with pytest.raises(TypeError, match="system prompt must be a string"):
-        ConversationalPromptRenderer(system_prompt=prompt)  # type: ignore[arg-type]
+        ConversationalPromptRenderer(
+            system_prompt=prompt, max_history_messages=limit  # type: ignore[arg-type]
+        )
 
 
-def test_render_requires_tuesday_request() -> None:
-    renderer = ConversationalPromptRenderer()
+@pytest.mark.parametrize("limit", [None, 0, 1])
+def test_render_requires_tuesday_request(limit) -> None:
+    renderer = ConversationalPromptRenderer(max_history_messages=limit)
     context = ConversationContext()
 
     with pytest.raises(TypeError, match="request must be a TuesdayRequest"):
         renderer.render(object(), context)  # type: ignore[arg-type]
 
 
-def test_render_requires_conversation_context() -> None:
-    renderer = ConversationalPromptRenderer()
+@pytest.mark.parametrize("limit", [None, 0, 1])
+def test_render_requires_conversation_context(limit) -> None:
+    renderer = ConversationalPromptRenderer(max_history_messages=limit)
     request = make_request()
 
     with pytest.raises(TypeError, match="context must be a ConversationContext"):
         renderer.render(request, object())  # type: ignore[arg-type]
 
 
-def test_render_rejects_mismatched_conversation_ids() -> None:
-    renderer = ConversationalPromptRenderer()
+@pytest.mark.parametrize("limit", [None, 0, 1])
+def test_render_rejects_mismatched_conversation_ids(limit) -> None:
+    renderer = ConversationalPromptRenderer(max_history_messages=limit)
     request = make_request()
     context = ConversationContext()
 
@@ -366,3 +373,174 @@ def test_prompting_module_does_not_expose_provider_specific_types() -> None:
     )
     assert not hasattr(prompting, "OpenAILanguageModelProvider")
     assert not hasattr(prompting, "AsyncOpenAI")
+
+
+@pytest.fixture
+def deterministic_history():
+    return tuple(
+        ConversationMessage(
+            role=role,
+            content=content,
+            message_id=UUID(int=index + 1),
+            # Deliberately reverse timestamps: tuple order governs selection.
+            created_at=datetime(2026, 11, 24, tzinfo=UTC) - timedelta(minutes=index),
+        )
+        for index, (role, content) in enumerate(
+            (
+                (MessageRole.SYSTEM, "  Old system\ncontext  "),
+                (MessageRole.ASSISTANT, "First answer"),
+                (MessageRole.USER, "  Second question\nline two  "),
+                (MessageRole.ASSISTANT, "Second answer"),
+                (MessageRole.SYSTEM, "  Recent system\ncontext  "),
+                (MessageRole.ASSISTANT, "  Latest answer\nline two  "),
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize("limit", [None, 0, 1, 2, 100])
+def test_history_limit_accepts_nonnegative_int_or_none_without_coercion(limit):
+    renderer = ConversationalPromptRenderer(max_history_messages=limit)
+
+    assert renderer.max_history_messages is limit
+
+
+@pytest.mark.parametrize("invalid", [True, False, 1.5, "3", [], {}, object()])
+def test_history_limit_rejects_non_integer_types(invalid):
+    with pytest.raises(TypeError, match="max_history_messages must be an int or None"):
+        ConversationalPromptRenderer(max_history_messages=invalid)
+
+
+@pytest.mark.parametrize("invalid", [-1, -100])
+def test_history_limit_rejects_negative_integers(invalid):
+    with pytest.raises(ValueError, match="max_history_messages must be nonnegative"):
+        ConversationalPromptRenderer(max_history_messages=invalid)
+
+
+def test_history_limit_is_keyword_only_and_system_prompt_remains_positional():
+    parameters = inspect.signature(ConversationalPromptRenderer).parameters
+    assert tuple(parameters) == ("system_prompt", "max_history_messages")
+    assert parameters["system_prompt"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert parameters["max_history_messages"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["max_history_messages"].default is None
+    assert ConversationalPromptRenderer().max_history_messages is None
+    positional = ConversationalPromptRenderer("Custom prompt")
+    assert positional.system_prompt == "Custom prompt"
+    renderer = ConversationalPromptRenderer("Custom prompt", max_history_messages=2)
+    assert renderer.system_prompt == "Custom prompt"
+    assert renderer.max_history_messages == 2
+    with pytest.raises(TypeError):
+        ConversationalPromptRenderer("Custom prompt", 2)
+
+
+@pytest.mark.parametrize(
+    "limit,indices",
+    [
+        (None, (0, 1, 2, 3, 4, 5)),
+        (0, ()),
+        (1, (5,)),
+        (2, (4, 5)),
+        (4, (2, 3, 4, 5)),
+        (20, (0, 1, 2, 3, 4, 5)),
+    ],
+)
+@pytest.mark.parametrize("empty", [False, True])
+def test_history_window_preserves_roles_text_order_and_prompt_boundaries(
+    deterministic_history, limit, indices, empty
+):
+    renderer = ConversationalPromptRenderer(
+        "  Configured system\nprompt  ", max_history_messages=limit
+    )
+    request = make_request("  Current user request\nline two  ")
+    context = make_context(
+        request.conversation_id, *(() if empty else deterministic_history)
+    )
+
+    rendered = renderer.render(request, context)
+
+    expected = () if empty else tuple(deterministic_history[index] for index in indices)
+    assert [(message.role, message.content) for message in rendered.messages] == [
+        (MessageRole.SYSTEM, renderer.system_prompt),
+        *((message.role, message.content) for message in expected),
+        (MessageRole.USER, request.content),
+    ]
+    assert len(rendered.messages) == len(expected) + 2
+    assert rendered.tools == ()
+
+
+def test_bounded_rendering_preserves_source_values_and_immutable_new_messages(
+    deterministic_history,
+):
+    renderer = ConversationalPromptRenderer(max_history_messages=2)
+    request = make_request("  Continue\nplease  ")
+    context = ConversationContext(request.conversation_id, deterministic_history)
+    original_request, original_context = replace(request), replace(context)
+    original_messages = tuple(replace(message) for message in context.messages)
+
+    first = renderer.render(request, context)
+    second = renderer.render(request, context)
+
+    assert not hasattr(renderer, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        renderer.max_history_messages = 0
+    assert request == original_request
+    assert context == original_context
+    assert context.messages is deterministic_history
+    assert context.messages == original_messages
+    for original, retained in zip(deterministic_history, context.messages, strict=True):
+        assert retained is original
+    assert first == second and first is not second
+    for selected, rendered, repeated in zip(
+        deterministic_history[-2:],
+        first.messages[1:-1],
+        second.messages[1:-1],
+        strict=True,
+    ):
+        assert type(rendered) is LanguageModelMessage
+        assert rendered is not selected and rendered is not repeated
+        assert (rendered.role, rendered.content) == (selected.role, selected.content)
+        with pytest.raises(FrozenInstanceError):
+            rendered.content = "Changed"
+
+
+@pytest.mark.parametrize("limit", [0, 1])
+def test_omitted_invalid_history_member_still_fails_validation(limit):
+    renderer = ConversationalPromptRenderer(max_history_messages=limit)
+    request = make_request()
+    context = make_context(
+        request.conversation_id,
+        object(),
+        ConversationMessage(MessageRole.ASSISTANT, "Latest valid reply"),
+    )
+    with pytest.raises(
+        TypeError, match="context messages must be ConversationMessage instances"
+    ):
+        renderer.render(request, context)
+
+
+def test_interleaved_bounded_renders_use_only_the_supplied_context(
+    deterministic_history,
+):
+    renderer = ConversationalPromptRenderer(max_history_messages=2)
+    request_a, request_b = make_request("A current"), make_request("B current")
+    context_a = make_context(request_a.conversation_id, *deterministic_history)
+    history_b = tuple(
+        replace(message, content="B " + message.content)
+        for message in deterministic_history
+    )
+    context_b = make_context(request_b.conversation_id, *history_b)
+    first_a = renderer.render(request_a, context_a)
+    rendered_b = renderer.render(request_b, context_b)
+    second_a = renderer.render(request_a, context_a)
+
+    assert first_a == second_a
+    assert [message.content for message in first_a.messages[1:-1]] == [
+        message.content for message in deterministic_history[-2:]
+    ]
+    assert [message.content for message in rendered_b.messages[1:-1]] == [
+        message.content for message in history_b[-2:]
+    ]
+    assert tuple(field.name for field in fields(renderer)) == (
+        "system_prompt",
+        "max_history_messages",
+    )

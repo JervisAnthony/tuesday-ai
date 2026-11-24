@@ -1,6 +1,6 @@
 """Render conversational TUESDAY context into provider-neutral model input."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from tuesday.domain import (
     ConversationContext,
@@ -26,19 +26,25 @@ class ConversationalPromptRenderer:
     """Build immutable model input from a request and its prior conversation context."""
 
     system_prompt: str = DEFAULT_CONVERSATIONAL_SYSTEM_PROMPT
+    max_history_messages: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.system_prompt, str):
             raise TypeError("Conversational system prompt must be a string.")
         if not self.system_prompt.strip():
             raise ValueError("Conversational system prompt must not be empty.")
+        if self.max_history_messages is not None:
+            if type(self.max_history_messages) is not int:
+                raise TypeError("max_history_messages must be an int or None.")
+            if self.max_history_messages < 0:
+                raise ValueError("max_history_messages must be nonnegative.")
 
     def render(
         self,
         request: TuesdayRequest,
         context: ConversationContext,
     ) -> LanguageModelRequest:
-        """Render prior context followed by the current user request."""
+        """Validate context, then render selected history and the current request."""
         if not isinstance(request, TuesdayRequest):
             raise TypeError("request must be a TuesdayRequest.")
         if not isinstance(context, ConversationContext):
@@ -54,6 +60,13 @@ class ConversationalPromptRenderer:
                 "Conversation context messages must be ConversationMessage instances."
             )
 
+        if self.max_history_messages is None:
+            history = context.messages
+        elif self.max_history_messages == 0:
+            history = ()
+        else:
+            history = context.messages[-self.max_history_messages:]
+
         messages = (
             LanguageModelMessage(
                 role=MessageRole.SYSTEM,
@@ -61,7 +74,7 @@ class ConversationalPromptRenderer:
             ),
             *(
                 LanguageModelMessage(role=message.role, content=message.content)
-                for message in context.messages
+                for message in history
             ),
             LanguageModelMessage(
                 role=MessageRole.USER,
