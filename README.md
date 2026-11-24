@@ -253,6 +253,27 @@ An optional `renderer=renderer` preserves an existing custom
 authorization, repository reads, or writes, and creates no persistence backend.
 All three existing orchestrator factories retain their behavior.
 
+To bound model-visible history explicitly, pass a configured renderer through
+the same stateful factory:
+
+```python
+from tuesday.prompting import ConversationalPromptRenderer
+
+renderer = ConversationalPromptRenderer(max_history_messages=4)
+service = create_stateful_guarded_openai_service(
+    tool_turn_service,
+    tools,
+    repository,
+    renderer=renderer,
+)
+```
+
+The model-backed, guarded OpenAI, and stateful guarded factories already accept
+`renderer=renderer` and preserve the exact instance; no new factory signatures
+are required. No default cap is imposed and no summarization occurs. The
+repository retains all successfully persisted history, even when the renderer
+includes only its most recent messages in model input.
+
 Each explicit `handle` call loads the current history before interaction and
 appends one original user message followed by one final assistant message only
 after a successful, completed response. Stored user messages retain their
@@ -693,6 +714,31 @@ as the final user message.
 The renderer does not call OpenAI or any other provider, does not include
 conversation/request identifiers in model input, and does not mutate the source
 request or context.
+
+Callers can explicitly limit historical messages:
+
+```python
+from tuesday.prompting import ConversationalPromptRenderer
+
+renderer = ConversationalPromptRenderer(max_history_messages=4)
+```
+
+The keyword-only `max_history_messages` defaults to `None`, which sends the full
+available history. Zero excludes all historical messages; a positive integer N
+selects the last N historical messages in their original tuple order. Booleans
+and other non-integer values are rejected, as are negative integers.
+
+The configured system prompt always appears first and the current user request
+always appears last; neither counts toward the history limit. Selected messages
+preserve their original roles and exact text, including whitespace and newlines.
+Historical system messages count toward the same cap as other history. The
+entire context is validated before selection, including omitted messages.
+
+Limits count individual messages, not complete turns: odd limits may split a
+prior user/assistant pair. This changes only model-visible history; stored
+repository history remains unchanged. It performs no summarization or token
+counting and does not guarantee that input fits a model's context window.
+Existing callers retain unlimited history unless they opt in explicitly.
 
 ## Model-backed conversational agent
 

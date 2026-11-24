@@ -429,7 +429,12 @@ def test_calculator_turn_then_text_turn_reuses_only_completed_conversation(stack
     ]
 
 
-def test_interleaved_conversation_ids_keep_histories_separate(stack):
+@pytest.mark.parametrize("limit", [None, 0, 1, 2])
+def test_interleaved_conversation_ids_keep_histories_separate(stack, limit):
+    renderer = ConversationalPromptRenderer(max_history_messages=limit)
+    stack.stateful = create_stateful_guarded_openai_service(
+        stack.tool_turn, TOOLS, stack.repository, renderer=renderer
+    )
     conversation_a, conversation_b = uuid4(), uuid4()
     requests = (
         TuesdayRequest("/chat A first question", conversation_a),
@@ -448,10 +453,14 @@ def test_interleaved_conversation_ids_keep_histories_separate(stack):
     assert payloads[0] == [system, {"role": "user", "content": "A first question"}]
     assert payloads[1] == [system, {"role": "user", "content": "B first question"}]
     for first_index, second_index in ((0, 2), (1, 3)):
-        assert payloads[second_index] == [
-            system,
+        prior = [
             {"role": "user", "content": requests[first_index].content},
             {"role": "assistant", "content": answers[first_index]},
+        ]
+        expected_history = {None: prior, 0: [], 1: [prior[1]], 2: prior}[limit]
+        assert payloads[second_index] == [
+            system,
+            *expected_history,
             {
                 "role": "user",
                 "content": requests[second_index].content.split(" ", 1)[1],
@@ -500,9 +509,14 @@ def test_interleaved_conversation_ids_keep_histories_separate(stack):
         ("continued", ToolAuthorizationOutcome.ALLOW, LanguageModelProviderError),
     ],
 )
+@pytest.mark.parametrize("limit", [None, 0, 1, 2])
 def test_failed_later_turn_preserves_existing_successful_history(
-    stack, failure, error_type
+    stack, failure, error_type, limit
 ):
+    renderer = ConversationalPromptRenderer(max_history_messages=limit)
+    stack.stateful = create_stateful_guarded_openai_service(
+        stack.tool_turn, TOOLS, stack.repository, renderer=renderer
+    )
     first, before = establish_history(stack)
     request = TuesdayRequest(
         "/conversation Attempt another operation", first.conversation_id
@@ -524,7 +538,7 @@ def test_failed_later_turn_preserves_existing_successful_history(
     elif failure == "lookup":
         tools = (LanguageModelToolDefinition("unknown.tool", "Unknown", {}),)
         stack.stateful = create_stateful_guarded_openai_service(
-            stack.tool_turn, tools, stack.repository
+            stack.tool_turn, tools, stack.repository, renderer=renderer
         )
         stack.create.side_effect = [raw(function(name="unknown.tool"))]
     elif failure in ("provider", "tool", "result", "continued"):
@@ -559,6 +573,170 @@ def test_failed_later_turn_preserves_existing_successful_history(
     assert stack.create.await_count == (
         0 if failure == "provider" else 2 if failure.startswith("incomplete") else 1
     )
+
+
+@pytest.mark.parametrize("limit", [None, 0, 2])
+def test_eight_text_turns_bound_provider_input_but_retain_all_history(
+    stack, monkeypatch, limit
+):
+    renderer = ConversationalPromptRenderer(
+        "  Stateful bounded system\nline two  ", max_history_messages=limit
+    )
+    stack.stateful = create_stateful_guarded_openai_service(
+        stack.tool_turn, TOOLS, stack.repository, renderer=renderer
+    )
+    agent = stack.stateful._orchestrator._registry.get("conversation")
+    assert agent._renderer is renderer
+    agent_handle = AsyncMock(wraps=agent.handle)
+    monkeypatch.setattr(GuardedOpenAIConversationalAgent, "handle", agent_handle)
+    conversation_id = uuid4()
+    requests = [
+        TuesdayRequest(
+            f"{'/chat' if index % 2 == 0 else '/conversation'} Question {index}",
+            conversation_id,
+        )
+        for index in range(8)
+    ]
+    answers = [f"  Answer {index}\nline two  " for index in range(8)]
+    originals = [replace(request) for request in requests]
+    stack.create.side_effect = [raw(text=answer) for answer in answers]
+    expected_stored = []
+    expected_provider_history = []
+    previous = asyncio.run(stack.read(conversation_id))
+    responses = []
+    for index, (request, answer) in enumerate(zip(requests, answers, strict=True)):
+        response = handle(stack, request)
+        responses.append(response)
+        assert_correlated(response, request)
+        assert response.content == answer
+        prepared, loaded_context = agent_handle.call_args.args
+        assert prepared.content == f"Question {index}"
+        assert prepared.request_id == request.request_id
+        assert prepared.conversation_id == conversation_id
+        assert loaded_context.messages is previous.messages
+        assert message_values(loaded_context) == expected_stored
+        payload = stack.create.call_args.kwargs
+        assert payload["input"] == [
+            {"role": "system", "content": renderer.system_prompt},
+            *expected_provider_history,
+            {"role": "user", "content": f"Question {index}"},
+        ]
+        pair = [(MessageRole.USER, request.content), (MessageRole.ASSISTANT, answer)]
+        expected_stored.extend(pair)
+        provider_pair = [{"role": role.value, "content": text} for role, text in pair]
+        if limit is None:
+            expected_provider_history.extend(provider_pair)
+        elif limit == 2:
+            expected_provider_history = provider_pair
+        saved = asyncio.run(stack.read(conversation_id))
+        assert message_values(saved) == expected_stored
+        assert len(saved.messages) == (index + 1) * 2
+        assert all(
+            old is retained
+            for old, retained in zip(
+                previous.messages, saved.messages[:-2], strict=True
+            )
+        )
+        previous = saved
+    assert requests == originals
+    assert len({response.response_id for response in responses}) == 8
+    assert len(previous.messages) == 16
+    assert stack.spies["get"].await_count == 8
+    for call in stack.spies["get"].await_args_list:
+        assert call.args == (conversation_id,)
+    assert stack.spies["append"].await_count == stack.create.await_count == 8
+    for call in stack.spies["turn"].call_args_list:
+        assert call.args[0].tools is TOOLS
+    stack.spies["tool"].assert_not_awaited()
+    stack.spies["continued"].assert_not_awaited()
+
+
+def test_bounded_calculator_turn_preserves_scope_execution_and_full_history(stack):
+    renderer = ConversationalPromptRenderer(max_history_messages=2)
+    stack.stateful = create_stateful_guarded_openai_service(
+        stack.tool_turn, TOOLS, stack.repository, renderer=renderer
+    )
+    first, _ = establish_history(stack)
+    second = TuesdayRequest("/conversation Second question", first.conversation_id)
+    stack.create.side_effect = [raw(text="Second reply")]
+    handle(stack, second)
+    before = asyncio.run(stack.read(first.conversation_id))
+    assert len(before.messages) == 4
+    stack.events.reset_mock()
+    stack.create.reset_mock()
+    item = function("call_bounded_42")
+    stack.create.side_effect = [
+        raw(item, text="I will calculate that."),
+        raw(text="The result is 42."),
+    ]
+    request = TuesdayRequest("/chat What is 6 times 7?", first.conversation_id)
+
+    response = handle(stack, request)
+
+    assert_correlated(response, request)
+    assert response.content == "The result is 42."
+    for name in (
+        "get",
+        "turn",
+        "initial",
+        "execution",
+        "authorize",
+        "tool",
+        "continued",
+        "append",
+    ):
+        stack.spies[name].assert_awaited_once()
+    stack.spies["invocation"].assert_called_once()
+    stack.spies["result"].assert_called_once()
+    stack.factory.assert_called_once_with()
+    execution = stack.spies["result"].call_args.args[0]
+    assert execution.tool_call is stack.spies["execution"].call_args.args[0]
+    assert execution.tool_call.call_id == item.call_id
+    assert execution.invocation.invocation_id is INVOCATION_ID
+    assert str(execution.invocation.invocation_id) != item.call_id
+    stack.spies["authorize"].assert_awaited_once_with(execution.invocation)
+    assert execution.result.output == 42
+    model_request = stack.spies["turn"].call_args.args[0]
+    assert model_request is stack.spies["initial"].call_args.args[0]
+    assert model_request.tools is TOOLS
+    state, results = stack.spies["continued"].call_args.args
+    assert state.request is model_request
+    assert len(results) == 1
+    assert results[0].call_id == item.call_id
+    assert results[0].output == 42
+    assert stack.create.await_count == 2
+    initial, continued = [call.kwargs for call in stack.create.call_args_list]
+    assert initial["input"] == [
+        {"role": "system", "content": renderer.system_prompt},
+        {"role": "user", "content": second.content},
+        {"role": "assistant", "content": "Second reply"},
+        {"role": "user", "content": "What is 6 times 7?"},
+    ]
+    assert initial["tools"] == continued["tools"] == [
+        {
+            "type": "function",
+            "name": "calculator.basic",
+            "description": "Arithmetic",
+            "parameters": {},
+        }
+    ]
+    assert continued["input"] == initial["input"] + [
+        item.model_dump(mode="json", exclude_none=True),
+        {"type": "function_call_output", "call_id": item.call_id, "output": "42"},
+    ]
+    for payload in (initial, continued):
+        assert payload["store"] is payload["stream"] is False
+        assert "previous_response_id" not in payload
+    saved = asyncio.run(stack.read(request.conversation_id))
+    assert saved.messages[:4] == before.messages
+    assert all(
+        old is retained
+        for old, retained in zip(before.messages, saved.messages[:4], strict=True)
+    )
+    assert message_values(saved) == message_values(before) + [
+        (MessageRole.USER, request.content),
+        (MessageRole.ASSISTANT, response.content),
+    ]
 
 
 @pytest.mark.parametrize(
