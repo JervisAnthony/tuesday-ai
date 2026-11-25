@@ -34,7 +34,7 @@ python -m tuesday "/chat Hello TUESDAY"
 tuesday "/chat Hello TUESDAY"
 ```
 
-Both entry points use the existing deterministic conversational agent. The
+Both entry points default to the existing deterministic conversational agent. The
 example prints `TUESDAY received: Hello TUESDAY`. Each invocation handles one
 request through the existing default orchestrator and stateful conversation
 service. Plain-text output contains only the completed response and a terminal
@@ -82,16 +82,19 @@ python -m tuesday --json --database /caller-selected/location/history.sqlite3 "/
 ```
 
 Exit status `0` means success, help, or version; `1` means an expected routing,
-preparation, or storage failure; `2` means invalid command-line arguments; and
+preparation, storage, model configuration, or provider failure; `2` means invalid
+command-line arguments; and
 `130` means interruption. Errors go to stderr without a successful stdout result.
 Unexpected internal programming errors propagate. Supported options are `-h`,
-`--help`, `--version`, `--conversation-id UUID`, `--database PATH`, and `--json`.
+`--help`, `--version`, `--conversation-id UUID`, `--database PATH`, `--json`,
+`--runtime {deterministic,openai}`, and `--max-history-messages N`.
 Invalid arguments are rejected before runtime or database construction.
 
-This initial CLI provides deterministic acknowledgments. It has no live
-model-backed execution, guarded tool execution, interactive REPL, or streaming.
-Model environment configuration does not activate a provider. There is no
-automatic database activation, conversation discovery, or request idempotency
+The default CLI provides deterministic acknowledgments. Model environment
+configuration alone does not activate a provider or get read by that path;
+`--runtime deterministic` selects it explicitly. There is no guarded tool
+execution, interactive REPL, streaming, automatic database activation,
+conversation discovery, or request idempotency
 guarantee. Programmatic asynchronous callers should use application services
 directly; CLI `main` uses `asyncio.run` and must not be invoked inside an already
 running event loop.
@@ -106,6 +109,63 @@ Command-line requests may remain in shell history or be visible through operatin
 system process inspection. Avoid secrets or sensitive personal information in
 arguments. Neither shell history nor database history is automatically securely
 deleted.
+
+### Opt-in OpenAI runtime
+
+Select model-backed, text-only execution explicitly:
+
+```text
+python -m tuesday --runtime openai "/chat Hello"
+tuesday --runtime openai --json "/conversation Explain the next step"
+```
+
+The existing configuration loader reads `TUESDAY_MODEL_PROVIDER`,
+`TUESDAY_MODEL_NAME`, and `TUESDAY_MODEL_API_KEY`. Set the provider to exactly
+`openai`, select a model available to your account, and supply its credential
+through your environment rather than command-line arguments. Optional
+`TUESDAY_MODEL_TIMEOUT_SECONDS` and `TUESDAY_MODEL_TEMPERATURE` retain their
+existing validation; OpenAI temperature must be between zero and two. Missing,
+unsupported, or invalid model settings fail with exit status `1`. Help and version
+require no model settings and construct no provider.
+
+This path reuses `OpenAILanguageModelProvider`, the model-backed orchestrator
+factory, and the stateful conversation service. Each valid successful interaction
+makes one text-generation request with SDK retries disabled. It advertises no
+tools and executes none; unexpected model tool calls retain the text-only agent's
+`UnsupportedModelToolCallError` and never produce a successful persisted pair.
+Provider failures report a concise stderr message and status `1`, without raw SDK
+details, credentials, or request content. There is no deterministic fallback or
+automatic retry. Unexpected internal failures propagate.
+
+Use SQLite and a message limit together when desired:
+
+```text
+python -m tuesday --runtime openai --json --database /caller-selected/location/history.sqlite3 --conversation-id 00000000-0000-0000-0000-000000000044 --max-history-messages 2 "/chat Continue"
+```
+
+Omitting `--max-history-messages` sends all available history. Zero excludes
+historical messages; positive N selects the last N individual messages in order.
+The system prompt and current prepared user request are always included. Odd
+limits may split a prior user/assistant pair. This is a message count, not a token,
+context-window, or cost guarantee, and SQLite retains complete successful history,
+including original user directives. The option is rejected as an argument error
+with deterministic runtime, before configuration or runtime construction.
+
+Explicit model execution sends the selected conversation content and current
+request to the configured provider. Review your history and provider settings
+before opting in. JSON retains the same four response fields; it adds no runtime
+or provider metadata.
+
+The CLI creates, executes, and asynchronously closes its provider-owned client
+within one `asyncio.run` lifecycle, including after composition, request, or
+storage failures. `OpenAILanguageModelProvider.aclose()` leaves injected clients
+under their caller's ownership; it adds no cleanup requirement to the abstract
+provider contract. If execution and cleanup both fail, the execution failure wins.
+Cleanup failures after successful execution propagate normally; SDK cleanup errors
+report a model failure with status `1`. Such cleanup can fail after the successful
+pair has already been committed, so failure status does not guarantee that nothing
+was persisted and is not a reason to replay automatically. Cleanup never undoes
+committed history, model requests, or external effects.
 
 ## Default application composition
 
