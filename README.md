@@ -23,6 +23,90 @@ Over time, TUESDAY aims to:
 - perform user-authorised actions; and
 - integrate with external tools and services.
 
+## Command-line interface
+
+Install the package for local development, then submit one quoted request with
+an explicit `/chat` or `/conversation` directive:
+
+```text
+python -m pip install -e ".[dev]"
+python -m tuesday "/chat Hello TUESDAY"
+tuesday "/chat Hello TUESDAY"
+```
+
+Both entry points use the existing deterministic conversational agent. The
+example prints `TUESDAY received: Hello TUESDAY`. Each invocation handles one
+request through the existing default orchestrator and stateful conversation
+service. Plain-text output contains only the completed response and a terminal
+newline. The original request reaches the service unchanged; existing routing
+and preparation remove the current directive before agent execution.
+
+Help and version work without a request or application execution:
+
+```text
+python -m tuesday --help
+python -m tuesday --version
+tuesday --help
+tuesday --version
+```
+
+Use `--json` to receive one object containing `content`, `conversation_id`,
+`request_id`, and `response_id`, all taken from the actual response. Without an
+explicit conversation ID, the domain generates a fresh one:
+
+```text
+python -m tuesday --json "/chat Hello TUESDAY"
+python -m tuesday --conversation-id 00000000-0000-0000-0000-000000000044 "/chat Hello"
+```
+
+Storage defaults to a fresh in-memory repository for every invocation. Reusing a
+conversation ID alone does not preserve history across processes. Select SQLite
+explicitly and reuse both its path and the conversation ID for durable history:
+
+```text
+python -m tuesday --database /caller-selected/location/history.sqlite3 --conversation-id 00000000-0000-0000-0000-000000000044 "/chat Hello"
+python -m tuesday --database /caller-selected/location/history.sqlite3 --conversation-id 00000000-0000-0000-0000-000000000044 "/conversation Continue"
+```
+
+Replace the example database path with a suitable caller-selected location whose
+parent directory already exists. The second command prints
+`TUESDAY received: Continue (2 prior messages in context)`. Both successful pairs
+remain stored, including the original routing directives. Different conversation
+IDs or database files have independent histories.
+
+You can also use `--database` without `--conversation-id`. Add `--json` to retrieve
+the generated identifier and reuse its `conversation_id` value in a later command:
+
+```text
+python -m tuesday --json --database /caller-selected/location/history.sqlite3 "/chat Start a new conversation"
+```
+
+Exit status `0` means success, help, or version; `1` means an expected routing,
+preparation, or storage failure; `2` means invalid command-line arguments; and
+`130` means interruption. Errors go to stderr without a successful stdout result.
+Unexpected internal programming errors propagate. Supported options are `-h`,
+`--help`, `--version`, `--conversation-id UUID`, `--database PATH`, and `--json`.
+Invalid arguments are rejected before runtime or database construction.
+
+This initial CLI provides deterministic acknowledgments. It has no live
+model-backed execution, guarded tool execution, interactive REPL, or streaming.
+Model environment configuration does not activate a provider. There is no
+automatic database activation, conversation discovery, or request idempotency
+guarantee. Programmatic asynchronous callers should use application services
+directly; CLI `main` uses `asyncio.run` and must not be invoked inside an already
+running event loop.
+
+Choose a protected database location and manage permissions and backups. SQLite
+adds no encryption-at-rest feature. Cancellation or interruption does not
+guarantee that an already-running database transaction stopped or rolled back;
+the CLI does not replay interrupted requests. See the SQLite repository section
+for its transaction and concurrency limitations.
+
+Command-line requests may remain in shell history or be visible through operating
+system process inspection. Avoid secrets or sensitive personal information in
+arguments. Neither shell history nor database history is automatically securely
+deleted.
+
 ## Default application composition
 
 TUESDAY has a deterministic end-to-end interaction path that composes its
