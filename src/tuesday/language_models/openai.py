@@ -85,6 +85,7 @@ class OpenAILanguageModelProvider(BaseLanguageModelProvider):
             )
 
         self._settings = settings
+        self._owns_client = client is None
         self._client = (
             AsyncOpenAI(
                 api_key=settings.api_key,
@@ -99,6 +100,16 @@ class OpenAILanguageModelProvider(BaseLanguageModelProvider):
     def name(self) -> str:
         """Return the adapter's stable provider identity."""
         return "openai"
+
+    async def aclose(self) -> None:
+        """Close a provider-owned client; injected clients remain caller-owned."""
+        if self._owns_client:
+            try:
+                await self._client.close()
+            except OpenAIError as error:
+                raise LanguageModelProviderError(
+                    "OpenAI provider client cleanup failed."
+                ) from error
 
     async def generate(
         self,

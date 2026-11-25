@@ -4,18 +4,31 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import sysconfig
+from contextlib import closing
 from importlib.metadata import distribution
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
 import pytest
+from openai import OpenAIError
 
 import tuesday
+import tuesday.language_models.openai as openai_adapter
+from tuesday.agents import (
+    GuardedOpenAIConversationalAgent,
+    UnsupportedModelToolCallError,
+)
 from tuesday.cli import main
 from tuesday.conversations import SQLiteConversationRepository
 from tuesday.domain import MessageRole
+from tuesday.prompting import DEFAULT_CONVERSATIONAL_SYSTEM_PROMPT
+from tuesday.services.openai_tool_turn import OpenAIToolTurnService
+from tuesday.tools import BasicCalculatorTool
 
 CONVERSATION_ID = "00000000-0000-0000-0000-000000000044"
 OTHER_ID = "00000000-0000-0000-0000-000000000045"
@@ -39,8 +52,9 @@ def history(path, conversation_id):
 
 
 @pytest.mark.parametrize("option", ["--help", "--version"])
-def test_module_help_and_version_do_not_create_storage(tmp_path, option):
-    result = invoke(tmp_path, option)
+@pytest.mark.parametrize("runtime", ["deterministic", "openai"])
+def test_module_help_and_version_do_not_create_storage(tmp_path, option, runtime):
+    result = invoke(tmp_path, "--runtime", runtime, option)
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     if option == "--version":
@@ -75,6 +89,17 @@ def test_module_text_and_json_success(tmp_path):
         (["/unknown Hello"], 1),
         (["/chat"], 1),
         (["/conversation"], 1),
+        (["--runtime", "unknown", "/chat Hello"], 2),
+        (
+            [
+                "--runtime",
+                "deterministic",
+                "--max-history-messages",
+                "0",
+                "/chat Hello",
+            ],
+            2,
+        ),
     ],
 )
 def test_process_exit_codes_and_stderr(tmp_path, arguments, exit_code):
@@ -230,6 +255,8 @@ def test_installed_entry_point_metadata_resolves_to_same_main():
         (["--help"], None, 0),
         ([], "", 2),
         (["/unknown Hello"], "", 1),
+        (["--runtime", "openai", "--version"], f"TUESDAY {tuesday.__version__}\n", 0),
+        (["--runtime", "openai", "--help"], None, 0),
     ],
 )
 def test_actual_installed_console_script(tmp_path, arguments, expected, exit_code):
@@ -249,3 +276,202 @@ def test_actual_installed_console_script(tmp_path, arguments, expected, exit_cod
     else:
         assert result.stdout == expected
     assert bool(result.stderr) is (exit_code != 0)
+
+
+@pytest.fixture
+def model_sdk(monkeypatch):
+    """In-process fake SDK I/O over the real CLI, provider, and SQLite stack."""
+    for name in ("PROVIDER", "NAME", "API_KEY", "TIMEOUT_SECONDS", "TEMPERATURE"):
+        monkeypatch.delenv("TUESDAY_MODEL_" + name, raising=False)
+    monkeypatch.setenv("TUESDAY_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("TUESDAY_MODEL_NAME", "fake-model")
+    monkeypatch.setenv("TUESDAY_MODEL_API_KEY", "fake-not-a-real-key")
+    create = AsyncMock()
+    clients = []
+
+    def construct(**kwargs):
+        client = SimpleNamespace(
+            responses=SimpleNamespace(create=create), close=AsyncMock()
+        )
+        clients.append(client)
+        return client
+
+    factory = Mock(side_effect=construct)
+    monkeypatch.setattr(openai_adapter, "AsyncOpenAI", factory)
+    forbidden = Mock(side_effect=AssertionError("No guarded runtime or tools"))
+    monkeypatch.setattr(GuardedOpenAIConversationalAgent, "__init__", forbidden)
+    monkeypatch.setattr(OpenAIToolTurnService, "__init__", forbidden)
+    monkeypatch.setattr(BasicCalculatorTool, "execute", forbidden)
+    return SimpleNamespace(
+        create=create, clients=clients, factory=factory, tools=forbidden
+    )
+
+
+def model_text(content):
+    return SimpleNamespace(output=(), output_text=content, model="fake-model")
+
+
+@pytest.mark.parametrize("limit", [None, 0, 2])
+def test_in_process_model_cli_reconstructs_sqlite_services_and_bounds_only_prompts(
+    tmp_path, capsys, model_sdk, limit
+):
+    path = tmp_path / "model-history.sqlite3"
+    options = [
+        "--runtime",
+        "openai",
+        "--json",
+        "--database",
+        str(path),
+        "--conversation-id",
+        CONVERSATION_ID,
+    ]
+    if limit is not None:
+        options += ["--max-history-messages", str(limit)]
+    answers = [f"  答え {index}\nline two  " for index in range(4)]
+    model_sdk.create.side_effect = [model_text(answer) for answer in answers]
+    expected = []
+    responses = []
+    for index, answer in enumerate(answers):
+        source = ("/chat" if index % 2 == 0 else "/conversation") + f" Question {index}"
+        prior = expected if limit is None else [] if limit == 0 else expected[-2:]
+        assert main([*options, source]) == 0
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        payload = json.loads(captured.out)
+        responses.append(payload)
+        assert set(payload) == {
+            "content",
+            "conversation_id",
+            "request_id",
+            "response_id",
+        }
+        assert payload["content"] == answer
+        assert payload["conversation_id"] == CONVERSATION_ID
+        assert model_sdk.create.call_args.kwargs["input"] == [
+            {"role": "system", "content": DEFAULT_CONVERSATIONAL_SYSTEM_PROMPT},
+            *({"role": role.value, "content": content} for role, content in prior),
+            {"role": "user", "content": f"Question {index}"},
+        ]
+        assert "tools" not in model_sdk.create.call_args.kwargs
+        expected.extend([(MessageRole.USER, source), (MessageRole.ASSISTANT, answer)])
+        saved = history(path, CONVERSATION_ID)
+        assert [(item.role, item.content) for item in saved.messages] == expected
+        assert len(saved.messages) == (index + 1) * 2
+    assert len(saved.messages) == 8
+    assert len({payload["request_id"] for payload in responses}) == 4
+    assert len({payload["response_id"] for payload in responses}) == 4
+    assert model_sdk.create.await_count == model_sdk.factory.call_count == 4
+    assert len(model_sdk.clients) == 4
+    for client in model_sdk.clients:
+        client.close.assert_awaited_once()
+    model_sdk.tools.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["provider", "append", "tool-call"])
+def test_in_process_failed_model_turn_preserves_committed_sqlite_history_without_retry(
+    tmp_path, capsys, model_sdk, failure
+):
+    path = tmp_path / "model-failures.sqlite3"
+    options = [
+        "--runtime",
+        "openai",
+        "--database",
+        str(path),
+        "--conversation-id",
+        CONVERSATION_ID,
+    ]
+    model_sdk.create.side_effect = [model_text("Earlier answer")]
+    assert main([*options, "/chat Earlier question"]) == 0
+    capsys.readouterr()
+    before = history(path, CONVERSATION_ID)
+    if failure == "provider":
+        model_sdk.create.side_effect = OpenAIError("private SDK detail")
+    elif failure == "append":
+        with closing(sqlite3.connect(path)) as connection:
+            connection.execute("""
+                CREATE TRIGGER reject_reply BEFORE INSERT
+                ON tuesday_conversation_messages WHEN NEW.content = 'Reject reply'
+                BEGIN SELECT RAISE(ABORT, 'Cannot persist reply'); END
+            """)
+        model_sdk.create.side_effect = [model_text("Reject reply")]
+    else:
+        tool_call = SimpleNamespace(
+            type="function_call",
+            call_id="call_not_executed",
+            name="calculator.basic",
+            arguments="{}",
+        )
+        model_sdk.create.side_effect = [
+            SimpleNamespace(output=(tool_call,), output_text=None, model="fake-model")
+        ]
+    if failure == "tool-call":
+        with pytest.raises(UnsupportedModelToolCallError):
+            main([*options, "/chat Do not execute a tool"])
+    else:
+        assert main([*options, "/chat Failed later request"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    if failure != "tool-call":
+        assert captured.err in (
+            "tuesday: model operation failed.\n",
+            "tuesday: conversation storage failed.\n",
+        )
+    assert history(path, CONVERSATION_ID) == before
+    assert len(before.messages) == 2
+    assert model_sdk.create.await_count == 2
+    assert model_sdk.factory.call_count == 2
+    for client in model_sdk.clients:
+        client.close.assert_awaited_once()
+    model_sdk.tools.assert_not_called()
+
+
+def test_process_openai_missing_configuration_fails_without_network_or_database(
+    tmp_path,
+):
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("TUESDAY_MODEL_")
+    }
+    result = invoke(tmp_path, "--runtime", "openai", "/chat Hello", env=env)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "tuesday: invalid OpenAI model configuration.\n"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cleanup_failure_does_not_undo_a_committed_model_turn(
+    tmp_path, capsys, model_sdk
+):
+    path = tmp_path / "committed-before-cleanup.sqlite3"
+    model_sdk.create.side_effect = [model_text("Committed answer")]
+    original = model_sdk.factory.side_effect
+
+    def failing_cleanup(**kwargs):
+        client = original(**kwargs)
+        client.close.side_effect = OpenAIError("private cleanup details")
+        return client
+
+    model_sdk.factory.side_effect = failing_cleanup
+    assert (
+        main(
+            [
+                "--runtime",
+                "openai",
+                "--database",
+                str(path),
+                "--conversation-id",
+                CONVERSATION_ID,
+                "/chat Committed question",
+            ]
+        )
+        == 1
+    )
+    assert capsys.readouterr() == ("", "tuesday: model operation failed.\n")
+    saved = history(path, CONVERSATION_ID)
+    assert [(message.role, message.content) for message in saved.messages] == [
+        (MessageRole.USER, "/chat Committed question"),
+        (MessageRole.ASSISTANT, "Committed answer"),
+    ]
+    model_sdk.create.assert_awaited_once()
+    model_sdk.clients[0].close.assert_awaited_once()

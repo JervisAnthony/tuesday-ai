@@ -7,6 +7,7 @@ import json
 import tomllib
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import AsyncMock
 
 import pytest
 from openai import OpenAIError
@@ -703,7 +704,35 @@ def test_sequential_requests_do_not_leak_provider_state() -> None:
     assert vars(provider) == {
         "_settings": provider._settings,
         "_client": provider._client,
+        "_owns_client": False,
     }
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_explicit_cleanup_respects_client_ownership(monkeypatch, owned):
+    client = FakeAsyncOpenAI()
+    client.close = AsyncMock()
+    monkeypatch.setattr(openai_adapter, "AsyncOpenAI", lambda **kwargs: client)
+    provider = OpenAILanguageModelProvider(
+        make_settings(), **({} if owned else {"client": client})
+    )
+    asyncio.run(provider.aclose())
+    assert provider._owns_client is owned
+    assert client.close.await_count == int(owned)
+
+
+def test_owned_client_cleanup_wraps_sdk_errors_without_disclosing_details(monkeypatch):
+    client = FakeAsyncOpenAI()
+    error = OpenAIError("private SDK error and credential")
+    client.close = AsyncMock(side_effect=error)
+    monkeypatch.setattr(openai_adapter, "AsyncOpenAI", lambda **kwargs: client)
+    provider = OpenAILanguageModelProvider(make_settings())
+    with pytest.raises(
+        LanguageModelProviderError, match="client cleanup failed"
+    ) as caught:
+        asyncio.run(provider.aclose())
+    assert caught.value.__cause__ is error
+    assert "private" not in str(caught.value)
 
 
 def test_separate_provider_instances_are_independent() -> None:

@@ -6,13 +6,17 @@ import importlib
 import json
 import runpy
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
 import pytest
+from openai import OpenAIError
 
 import tuesday
 import tuesday.cli as cli
+import tuesday.language_models.openai as openai_adapter
+from tuesday.agents import UnsupportedModelToolCallError
 from tuesday.conversations import (
     ConversationRepositoryError,
     InMemoryConversationRepository,
@@ -116,6 +120,14 @@ def test_json_uses_actual_response_and_one_real_stateful_invocation(
         ["--json"],
         ["--dat", "somewhere.db", "/chat Hello"],
         ["--js", "/chat Hello"],
+        ["--runtime", "unknown", "/chat Hello"],
+        ["--runtime"],
+        ["--runtime", "openai", "--max-history-messages", "-1", "/chat Hello"],
+        ["--runtime", "openai", "--max-history-messages", "1.5", "/chat Hello"],
+        ["--runtime", "openai", "--max-history-messages", "bad", "/chat Hello"],
+        ["--runtime", "openai", "--max-history-messages"],
+        ["--max-history-messages", "0", "/chat Hello"],
+        ["--runtime", "deterministic", "--max-history-messages", "2", "/chat Hello"],
     ],
 )
 def test_argument_failures_exit_two_before_runtime_or_database_creation(
@@ -127,6 +139,9 @@ def test_argument_failures_exit_two_before_runtime_or_database_creation(
         "SQLiteConversationRepository",
         "create_default_orchestrator",
         "StatefulConversationService",
+        "load_settings",
+        "OpenAILanguageModelProvider",
+        "create_model_backed_orchestrator",
     ):
         spy = Mock(
             side_effect=AssertionError("Argument errors must not construct runtime")
@@ -146,19 +161,22 @@ def test_argument_failures_exit_two_before_runtime_or_database_creation(
 
 
 @pytest.mark.parametrize("option", ["-h", "--help", "--version"])
+@pytest.mark.parametrize("runtime", ["deterministic", "openai"])
 def test_help_and_version_exit_zero_without_constructing_runtime(
-    monkeypatch, capsys, tmp_path, option
+    monkeypatch, capsys, tmp_path, option, runtime
 ):
     for name in (
         "InMemoryConversationRepository",
         "SQLiteConversationRepository",
         "create_default_orchestrator",
         "StatefulConversationService",
+        "load_settings",
+        "OpenAILanguageModelProvider",
     ):
         monkeypatch.setattr(cli, name, Mock(side_effect=AssertionError("No runtime")))
     path = tmp_path / "not-created.db"
     with pytest.raises(SystemExit) as caught:
-        cli.main(["--database", str(path), option])
+        cli.main(["--runtime", runtime, "--database", str(path), option])
     assert caught.value.code == 0
     output = capsys.readouterr()
     assert output.err == ""
@@ -344,7 +362,10 @@ def test_ordinary_main_module_import_does_not_parse_or_execute(monkeypatch):
     main.assert_not_called()
 
 
-def test_model_configuration_never_selects_model_or_tool_execution(monkeypatch, capsys):
+@pytest.mark.parametrize("explicit", [False, True])
+def test_model_configuration_never_selects_model_or_tool_execution(
+    monkeypatch, capsys, explicit
+):
     import tuesday.agents as agents
     import tuesday.config as config
     import tuesday.language_models as models
@@ -355,6 +376,7 @@ def test_model_configuration_never_selects_model_or_tool_execution(monkeypatch, 
     monkeypatch.setenv("TUESDAY_MODEL_API_KEY", "fake-not-a-real-key")
     forbidden = Mock(side_effect=AssertionError("No model or guarded tool activation"))
     monkeypatch.setattr(config, "load_settings", forbidden)
+    monkeypatch.setattr(cli, "load_settings", forbidden)
     for component in (
         models.OpenAILanguageModelProvider,
         agents.ModelBackedConversationalAgent,
@@ -362,6 +384,247 @@ def test_model_configuration_never_selects_model_or_tool_execution(monkeypatch, 
         OpenAIToolTurnService,
     ):
         monkeypatch.setattr(component, "__init__", forbidden)
-    assert cli.main(["/chat Deterministic"]) == 0
+    options = ["--runtime", "deterministic"] if explicit else []
+    assert cli.main([*options, "/chat Deterministic"]) == 0
     assert capsys.readouterr() == ("TUESDAY received: Deterministic\n", "")
     forbidden.assert_not_called()
+
+
+@pytest.fixture
+def sdk(monkeypatch):
+    """Fake SDK I/O while retaining the production application stack."""
+    for name in ("PROVIDER", "NAME", "API_KEY", "TIMEOUT_SECONDS", "TEMPERATURE"):
+        monkeypatch.delenv("TUESDAY_MODEL_" + name, raising=False)
+    monkeypatch.setenv("TUESDAY_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("TUESDAY_MODEL_NAME", "fake-model")
+    monkeypatch.setenv("TUESDAY_MODEL_API_KEY", "fake-cli-key")
+    state = SimpleNamespace(
+        response=SimpleNamespace(
+            output=(), output_text="  Model reply\nline two  ", model="fake-model"
+        ),
+        loops=[],
+    )
+
+    async def generate(**kwargs):
+        state.loops.append(asyncio.get_running_loop())
+        return state.response
+
+    async def close():
+        state.loops.append(asyncio.get_running_loop())
+
+    state.create = AsyncMock(side_effect=generate)
+    state.close = AsyncMock(side_effect=close)
+    state.client = SimpleNamespace(
+        responses=SimpleNamespace(create=state.create), close=state.close
+    )
+
+    def construct(**kwargs):
+        state.loops.append(asyncio.get_running_loop())
+        return state.client
+
+    state.factory = Mock(side_effect=construct)
+    monkeypatch.setattr(openai_adapter, "AsyncOpenAI", state.factory)
+    return state
+
+
+@pytest.mark.parametrize("directive", ["/chat", "/conversation"])
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("explicit_id", [False, True])
+def test_openai_runtime_uses_real_stack_actual_response_and_one_owned_loop(
+    sdk, monkeypatch, capsys, directive, as_json, explicit_id
+):
+    original = StatefulConversationService.handle
+    interactions = []
+
+    async def record(self, request):
+        response = await original(self, request)
+        interactions.append((request, response))
+        return response
+
+    monkeypatch.setattr(StatefulConversationService, "handle", record)
+    factory = Mock(wraps=cli.create_model_backed_orchestrator)
+    monkeypatch.setattr(cli, "create_model_backed_orchestrator", factory)
+    options = ["--runtime", "openai"]
+    if explicit_id:
+        options += ["--conversation-id", CONVERSATION_ID]
+    source = directive + "   Original café\nrequest  "
+    assert cli.main([*options, *(["--json"] if as_json else []), source]) == 0
+    output = capsys.readouterr()
+    request, response = interactions[0]
+    assert len(interactions) == 1
+    assert request.content == source
+    assert response.conversation_id == request.conversation_id
+    if explicit_id:
+        assert response.conversation_id == UUID(CONVERSATION_ID)
+    assert response.request_id == request.request_id
+    if as_json:
+        assert json.loads(output.out) == {
+            "content": response.content,
+            "conversation_id": str(response.conversation_id),
+            "request_id": str(response.request_id),
+            "response_id": str(response.response_id),
+        }
+    else:
+        assert output.out == "  Model reply\nline two  \n"
+    assert output.err == ""
+    sdk.factory.assert_called_once_with(
+        api_key="fake-cli-key", timeout=30.0, max_retries=0
+    )
+    sdk.create.assert_awaited_once()
+    sdk.close.assert_awaited_once()
+    assert len(sdk.loops) == 3 and all(loop is sdk.loops[0] for loop in sdk.loops)
+    payload = sdk.create.call_args.kwargs
+    assert payload["input"][-1] == {
+        "role": "user",
+        "content": "Original café\nrequest  ",
+    }
+    assert payload["store"] is payload["stream"] is False
+    assert "tools" not in payload
+    renderer = factory.call_args.kwargs["renderer"]
+    assert renderer.max_history_messages is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing",
+        "provider",
+        "model",
+        "unsupported",
+        "case",
+        "key",
+        "blank-key",
+        "temperature",
+    ],
+)
+def test_openai_configuration_errors_are_fixed_and_do_not_expose_secrets(
+    sdk, monkeypatch, capsys, failure
+):
+    if failure == "missing":
+        for name in ("PROVIDER", "NAME", "API_KEY"):
+            monkeypatch.delenv("TUESDAY_MODEL_" + name)
+    elif failure in ("provider", "model", "key"):
+        name = {"provider": "PROVIDER", "model": "NAME", "key": "API_KEY"}[failure]
+        monkeypatch.delenv("TUESDAY_MODEL_" + name)
+    elif failure in ("unsupported", "case"):
+        monkeypatch.setenv(
+            "TUESDAY_MODEL_PROVIDER", "other" if failure == "unsupported" else "OpenAI"
+        )
+    elif failure == "blank-key":
+        monkeypatch.setenv("TUESDAY_MODEL_API_KEY", "  ")
+    else:
+        monkeypatch.setenv("TUESDAY_MODEL_TEMPERATURE", "3")
+    assert cli.main(["--runtime", "openai", "--json", "/chat Private request"]) == 1
+    assert capsys.readouterr() == ("", "tuesday: invalid OpenAI model configuration.\n")
+    sdk.factory.assert_not_called()
+
+
+def test_openai_failure_is_reported_without_fallback_retry_or_secret_output(
+    sdk, capsys
+):
+    sdk.create.side_effect = OpenAIError("fake-cli-key Private request raw SDK detail")
+    assert cli.main(["--runtime", "openai", "--json", "/chat Private request"]) == 1
+    assert capsys.readouterr() == ("", "tuesday: model operation failed.\n")
+    sdk.create.assert_awaited_once()
+    sdk.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("operation", ["get_context", "append_messages"])
+def test_openai_client_is_closed_on_downstream_repository_failure(
+    sdk, monkeypatch, capsys, operation
+):
+    monkeypatch.setattr(
+        InMemoryConversationRepository,
+        operation,
+        AsyncMock(side_effect=ConversationRepositoryError("private")),
+    )
+    assert cli.main(["--runtime", "openai", "/chat Hello"]) == 1
+    assert capsys.readouterr() == ("", "tuesday: conversation storage failed.\n")
+    assert sdk.create.await_count == int(operation == "append_messages")
+    sdk.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "cleanup_error", [OpenAIError, RuntimeError, KeyboardInterrupt]
+)
+def test_cleanup_never_hides_primary_composition_failure(
+    sdk, monkeypatch, capsys, cleanup_error
+):
+    primary = ValueError("Unexpected composition defect")
+    monkeypatch.setattr(
+        cli, "create_model_backed_orchestrator", Mock(side_effect=primary)
+    )
+    sdk.close.side_effect = cleanup_error("Secondary cleanup failure")
+    with pytest.raises(ValueError) as caught:
+        cli.main(["--runtime", "openai", "/chat Hello"])
+    assert caught.value is primary
+    sdk.close.assert_awaited_once()
+    sdk.create.assert_not_awaited()
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("primary_type", [OpenAIError, RuntimeError, KeyboardInterrupt])
+def test_cleanup_failure_preserves_request_failure_or_interruption(
+    sdk, capsys, primary_type
+):
+    primary = primary_type("private primary failure")
+    sdk.create.side_effect = primary
+    sdk.close.side_effect = OpenAIError("private cleanup failure")
+    if primary_type is RuntimeError:
+        with pytest.raises(RuntimeError) as caught:
+            cli.main(["--runtime", "openai", "/chat Hello"])
+        assert caught.value is primary
+        assert capsys.readouterr() == ("", "")
+    else:
+        expected = 130 if primary_type is KeyboardInterrupt else 1
+        assert cli.main(["--runtime", "openai", "/chat Hello"]) == expected
+        error = "interrupted" if expected == 130 else "model operation failed"
+        assert capsys.readouterr() == ("", f"tuesday: {error}.\n")
+    sdk.create.assert_awaited_once()
+    sdk.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("error_type", [OpenAIError, RuntimeError])
+def test_cleanup_failure_after_success_is_not_silently_ignored(sdk, capsys, error_type):
+    error = error_type("private cleanup detail")
+    sdk.close.side_effect = error
+    if error_type is OpenAIError:
+        assert cli.main(["--runtime", "openai", "/chat Hello"]) == 1
+        assert capsys.readouterr() == ("", "tuesday: model operation failed.\n")
+    else:
+        with pytest.raises(RuntimeError) as caught:
+            cli.main(["--runtime", "openai", "/chat Hello"])
+        assert caught.value is error
+        assert capsys.readouterr() == ("", "")
+    sdk.create.assert_awaited_once()
+    sdk.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("source", ["/chat", "/unknown Hello"])
+def test_model_runtime_reuses_routing_failures_and_closes_without_generation(
+    sdk, capsys, source
+):
+    assert cli.main(["--runtime", "openai", source]) == 1
+    assert capsys.readouterr().out == ""
+    sdk.create.assert_not_awaited()
+    sdk.close.assert_awaited_once()
+
+
+def test_model_tool_calls_retain_text_only_agent_failure_without_execution(sdk, capsys):
+    sdk.response = SimpleNamespace(
+        output=(
+            SimpleNamespace(
+                type="function_call",
+                call_id="call_unexpected",
+                name="calculator.basic",
+                arguments="{}",
+            ),
+        ),
+        output_text=None,
+        model="fake-model",
+    )
+    with pytest.raises(UnsupportedModelToolCallError):
+        cli.main(["--runtime", "openai", "/chat Do not execute tools"])
+    sdk.create.assert_awaited_once()
+    sdk.close.assert_awaited_once()
+    assert capsys.readouterr() == ("", "")
