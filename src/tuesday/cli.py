@@ -1,11 +1,11 @@
-"""One-shot terminal entry point with explicit model-backed execution."""
+"""Terminal entry point with explicit model-backed and interactive execution."""
 
 import argparse
 import asyncio
 import json
 import sys
 from collections.abc import Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from tuesday import __version__
 from tuesday.composition import (
@@ -15,19 +15,14 @@ from tuesday.composition import (
 from tuesday.config import ConfigurationError, LanguageModelSettings, load_settings
 from tuesday.conversations import (
     BaseConversationRepository,
-    ConversationRepositoryError,
     InMemoryConversationRepository,
     SQLiteConversationRepository,
 )
 from tuesday.domain import TuesdayRequest, TuesdayResponse
-from tuesday.language_models import (
-    LanguageModelProviderError,
-    OpenAILanguageModelProvider,
-)
-from tuesday.preparation import RequestPreparationError
+from tuesday.language_models import OpenAILanguageModelProvider
 from tuesday.prompting import ConversationalPromptRenderer
-from tuesday.routing import NoRouteFoundError
 from tuesday.services.conversation import StatefulConversationService
+from tuesday.terminal_session import TURN_ERRORS, report_turn_error, run_session
 
 __all__ = ["main"]
 
@@ -53,6 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "request",
+        nargs="?",
         metavar="REQUEST",
         type=_nonempty_request,
         help="complete directive and content, quoted as one argument",
@@ -86,7 +82,41 @@ def _parser() -> argparse.ArgumentParser:
         metavar="N",
         help="OpenAI history message limit; zero omits history, default unlimited",
     )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="read sequential requests and local session commands from stdin",
+    )
     return parser
+
+
+async def _openai_runtime(
+    repository: BaseConversationRepository,
+    settings: LanguageModelSettings,
+    max_history_messages: int | None,
+) -> tuple[StatefulConversationService, OpenAILanguageModelProvider]:
+    """Construct on the execution loop and close the client if setup fails."""
+    provider = OpenAILanguageModelProvider(settings)
+    try:
+        renderer = ConversationalPromptRenderer(
+            max_history_messages=max_history_messages
+        )
+        orchestrator = create_model_backed_orchestrator(provider, renderer=renderer)
+        return StatefulConversationService(orchestrator, repository), provider
+    except BaseException:
+        await _close_provider(provider, completed=False)
+        raise
+
+
+async def _close_provider(
+    provider: OpenAILanguageModelProvider, *, completed: bool
+) -> None:
+    """Preserve a primary terminating failure; expose standalone cleanup failures."""
+    try:
+        await provider.aclose()
+    except BaseException:
+        if completed:
+            raise
 
 
 async def _run_openai(
@@ -95,27 +125,42 @@ async def _run_openai(
     settings: LanguageModelSettings,
     max_history_messages: int | None,
 ) -> TuesdayResponse:
-    """Execute and close the owned client on one loop, preserving primary errors."""
-    provider = OpenAILanguageModelProvider(settings)
+    service, provider = await _openai_runtime(
+        repository, settings, max_history_messages
+    )
     completed = False
     try:
-        renderer = ConversationalPromptRenderer(
-            max_history_messages=max_history_messages
-        )
-        orchestrator = create_model_backed_orchestrator(provider, renderer=renderer)
-        response = await StatefulConversationService(orchestrator, repository).handle(
-            request
-        )
+        response = await service.handle(request)
         completed = True
         return response
     finally:
+        await _close_provider(provider, completed=completed)
+
+
+def _run_interactive(
+    repository: BaseConversationRepository,
+    settings: LanguageModelSettings | None,
+    max_history_messages: int | None,
+    conversation_id: UUID | None,
+) -> int:
+    with asyncio.Runner() as runner:
+        provider = None
+        if settings is None:
+            service = StatefulConversationService(
+                create_default_orchestrator(), repository
+            )
+        else:
+            service, provider = runner.run(
+                _openai_runtime(repository, settings, max_history_messages)
+            )
+        completed = False
         try:
-            await provider.aclose()
-        except BaseException:
-            # Cleanup must never replace an execution error, including interruption.
-            # With no primary error, cleanup failures propagate normally.
-            if completed:
-                raise
+            run_session(service, conversation_id or uuid4(), runner)
+            completed = True
+        finally:
+            if provider is not None:
+                runner.run(_close_provider(provider, completed=completed))
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -126,14 +171,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.interactive:
+        if args.request is not None:
+            parser.error("--interactive does not accept a positional REQUEST.")
+        if args.json:
+            parser.error("--interactive does not support --json.")
+    elif args.request is None:
+        parser.error("REQUEST is required unless --interactive is selected.")
     if args.runtime == "deterministic" and args.max_history_messages is not None:
         parser.error("--max-history-messages requires --runtime openai.")
     try:
-        request = (
-            TuesdayRequest(args.request)
-            if args.conversation_id is None
-            else TuesdayRequest(args.request, conversation_id=args.conversation_id)
-        )
         model_settings = None
         if args.runtime == "openai":
             model_settings = load_settings().model
@@ -147,6 +194,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             except (TypeError, ValueError):
                 print("tuesday: invalid database path.", file=sys.stderr)
                 return 1
+        if args.interactive:
+            return _run_interactive(
+                repository,
+                model_settings,
+                args.max_history_messages,
+                args.conversation_id,
+            )
+        request = (
+            TuesdayRequest(args.request)
+            if args.conversation_id is None
+            else TuesdayRequest(args.request, conversation_id=args.conversation_id)
+        )
         if model_settings is None:
             service = StatefulConversationService(
                 create_default_orchestrator(), repository
@@ -161,20 +220,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigurationError:
         print("tuesday: invalid OpenAI model configuration.", file=sys.stderr)
         return 1
-    except LanguageModelProviderError:
-        print("tuesday: model operation failed.", file=sys.stderr)
-        return 1
-    except NoRouteFoundError:
-        print(
-            "tuesday: use an explicit /chat or /conversation directive.",
-            file=sys.stderr,
-        )
-        return 1
-    except RequestPreparationError:
-        print("tuesday: include content after the routing directive.", file=sys.stderr)
-        return 1
-    except ConversationRepositoryError:
-        print("tuesday: conversation storage failed.", file=sys.stderr)
+    except TURN_ERRORS as error:
+        report_turn_error(error)
         return 1
     except KeyboardInterrupt:
         print("tuesday: interrupted.", file=sys.stderr)

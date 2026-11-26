@@ -35,8 +35,8 @@ tuesday "/chat Hello TUESDAY"
 ```
 
 Both entry points default to the existing deterministic conversational agent. The
-example prints `TUESDAY received: Hello TUESDAY`. Each invocation handles one
-request through the existing default orchestrator and stateful conversation
+example prints `TUESDAY received: Hello TUESDAY`. Each one-shot invocation handles
+one request through the existing default orchestrator and stateful conversation
 service. Plain-text output contains only the completed response and a terminal
 newline. The original request reaches the service unchanged; existing routing
 and preparation remove the current directive before agent execution.
@@ -87,17 +87,17 @@ command-line arguments; and
 `130` means interruption. Errors go to stderr without a successful stdout result.
 Unexpected internal programming errors propagate. Supported options are `-h`,
 `--help`, `--version`, `--conversation-id UUID`, `--database PATH`, `--json`,
-`--runtime {deterministic,openai}`, and `--max-history-messages N`.
+`--runtime {deterministic,openai}`, `--max-history-messages N`, and `--interactive`.
 Invalid arguments are rejected before runtime or database construction.
 
 The default CLI provides deterministic acknowledgments. Model environment
 configuration alone does not activate a provider or get read by that path;
 `--runtime deterministic` selects it explicitly. There is no guarded tool
-execution, interactive REPL, streaming, automatic database activation,
+execution, streaming, automatic database activation,
 conversation discovery, or request idempotency
 guarantee. Programmatic asynchronous callers should use application services
-directly; CLI `main` uses `asyncio.run` and must not be invoked inside an already
-running event loop.
+directly; one-shot execution uses `asyncio.run`, while interactive mode owns an
+`asyncio.Runner`. CLI `main` must not be invoked inside an already-running event loop.
 
 Choose a protected database location and manage permissions and backups. SQLite
 adds no encryption-at-rest feature. Cancellation or interruption does not
@@ -156,8 +156,8 @@ request to the configured provider. Review your history and provider settings
 before opting in. JSON retains the same four response fields; it adds no runtime
 or provider metadata.
 
-The CLI creates, executes, and asynchronously closes its provider-owned client
-within one `asyncio.run` lifecycle, including after composition, request, or
+The one-shot CLI creates, executes, and asynchronously closes its provider-owned
+client within one `asyncio.run` lifecycle, including after composition, request, or
 storage failures. `OpenAILanguageModelProvider.aclose()` leaves injected clients
 under their caller's ownership; it adds no cleanup requirement to the abstract
 provider contract. If execution and cleanup both fail, the execution failure wins.
@@ -166,6 +166,85 @@ report a model failure with status `1`. Such cleanup can fail after the successf
 pair has already been committed, so failure status does not guarantee that nothing
 was persisted and is not a reason to replay automatically. Cleanup never undoes
 committed history, model requests, or external effects.
+
+### Interactive terminal conversations
+
+Select interactive mode explicitly to submit sequential requests in one session:
+
+```text
+python -m tuesday --interactive
+tuesday --interactive
+python -m tuesday --interactive --runtime openai --max-history-messages 2
+```
+
+One-shot execution still requires a positional request. Interactive mode accepts
+no positional request and cannot be combined with `--json`. These invalid
+combinations fail before configuration loading or runtime construction. Existing
+`--runtime`, `--conversation-id`, and `--database` options remain available;
+`--max-history-messages` continues to require the OpenAI runtime.
+
+Enter one physical line per request, beginning with `/chat` or `/conversation`
+and including content. Turns execute sequentially without automatic directive
+insertion, queuing, or retries. Blank lines are ignored. Submitted lines retain
+their content except for the terminal line ending; the existing router and
+preparer determine whether a request is valid. This is not multiline input or
+streaming output.
+
+Local commands begin with a colon and are never sent to the application or model:
+
+| Command | Behavior |
+|---|---|
+| `:help` | Show session commands and explicit directive requirements. |
+| `:id` | Show the selected conversation UUID. |
+| `:new` | Select a fresh UUID while retaining the repository and earlier history. |
+| `:use UUID` | Select an existing or unknown UUID; unknown IDs start with empty history. |
+| `:exit` | End the session normally. |
+
+Commands require the displayed argument counts and valid UUID syntax. Invalid or
+unknown commands report an error without changing the selected conversation.
+They do not create conversation messages. The initial UUID comes from
+`--conversation-id` when supplied, otherwise it is generated. Startup and `:id`
+show it on stderr so it can be reused explicitly later; no conversation is
+discovered automatically.
+
+A session retains one repository, orchestrator, and stateful service. In-memory
+history survives `:new` and `:use` switching within that session. For recovery
+across process restarts, choose SQLite and reuse the same path and UUID:
+
+```text
+python -m tuesday --interactive --database /caller-selected/location/history.sqlite3 --conversation-id 00000000-0000-0000-0000-000000000046
+```
+
+The database parent must already exist. Only completed successful turns are
+persisted through the existing service, with original user directives intact.
+OpenAI history limits affect model-visible input only, leaving stored history
+complete.
+
+Only successful response content and its terminal newline go to stdout. Session
+IDs, command help, selection confirmations, and errors go to stderr. A prompt is
+emitted on stderr only when stdin is a terminal; piped/scripted stdin is supported
+without prompts or input echo.
+
+`:exit` or EOF ends normally with status `0`. Expected routing, preparation,
+provider, and repository errors during a turn are reported and return to input;
+a later normal exit still returns `0`. Startup/configuration/storage-initialization
+errors return `1`, invalid CLI arguments return `2`, and keyboard interruption
+during input or execution terminates with `130`. Unexpected programming failures
+terminate and propagate. No failed or interrupted request is replayed.
+
+In OpenAI mode, settings load once and one provider and renderer serve the entire
+session, including recoverable failed turns and conversation switches. Async
+construction, every turn, and final cleanup share one event loop owned by a single
+`asyncio.Runner`. Terminal input is synchronous and interruptible; no background
+input worker remains blocked after exit. The owned provider closes once on EOF,
+explicit exit, interruption, fatal failure, or failure after provider construction.
+Injected clients retain caller ownership.
+
+Primary terminating failures take precedence over cleanup failures. A previously
+handled turn error does not hide a later cleanup-only failure, which remains
+visible under the existing CLI error rules. Already-emitted responses and committed
+history remain valid if a later turn or shutdown fails. Cleanup and interruption
+do not guarantee rollback or secure deletion, and external effects are not undone.
 
 ## Default application composition
 
