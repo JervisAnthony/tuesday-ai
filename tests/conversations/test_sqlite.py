@@ -113,6 +113,11 @@ def test_public_contract_and_exports(repository):
         "ConversationRepositoryError",
         "InMemoryConversationRepository",
         "SQLiteConversationRepository",
+        "BaseConversationHistoryReader",
+        "ConversationSummary",
+        "ConversationSummaryPage",
+        "ConversationMessagePage",
+        "SQLiteConversationHistoryReader",
     ]
     assert sqlite_module.__all__ == ["SQLiteConversationRepository"]
     for name in ("get_context", "append_messages"):
@@ -665,6 +670,7 @@ def test_storage_module_has_only_standard_library_and_domain_dependencies():
         "datetime",
         "pathlib",
         "uuid",
+        "tuesday.conversations._sqlite",
         "tuesday.conversations.base",
         "tuesday.domain",
     }

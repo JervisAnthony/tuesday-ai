@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
+from tuesday.conversations._sqlite import decode_message, schema_matches
 from tuesday.conversations.base import (
     BaseConversationRepository,
     ConversationRepositoryError,
@@ -39,14 +40,6 @@ INSERT INTO tuesday_conversation_messages
     (conversation_id, message_id, role, content, created_at)
 VALUES (?, ?, ?, ?, ?)
 """
-_SCHEMA = (
-    ("sequence", "INTEGER", 0, 1),
-    ("conversation_id", "TEXT", 1, 0),
-    ("message_id", "TEXT", 1, 0),
-    ("role", "TEXT", 1, 0),
-    ("content", "TEXT", 1, 0),
-    ("created_at", "TEXT", 1, 0),
-)
 
 
 class SQLiteConversationRepository(BaseConversationRepository):
@@ -88,8 +81,7 @@ class SQLiteConversationRepository(BaseConversationRepository):
             columns = connection.execute(
                 "PRAGMA table_info(tuesday_conversation_messages)"
             ).fetchall()
-            schema = tuple((row[1], row[2].upper(), row[3], row[5]) for row in columns)
-            if schema != _SCHEMA:
+            if not schema_matches(columns):
                 raise ConversationRepositoryError("Incompatible SQLite history schema.")
 
     def _connect(self) -> sqlite3.Connection:
@@ -164,22 +156,8 @@ class SQLiteConversationRepository(BaseConversationRepository):
         connection: sqlite3.Connection, conversation_id: UUID
     ) -> ConversationContext:
         rows = connection.execute(_SELECT, (str(conversation_id),)).fetchall()
-        messages = []
         try:
-            for message_id, role, content, created_at in rows:
-                if not all(
-                    isinstance(value, str)
-                    for value in (message_id, role, content, created_at)
-                ):
-                    raise TypeError("Stored message fields must be strings.")
-                messages.append(
-                    ConversationMessage(
-                        message_id=UUID(message_id),
-                        role=MessageRole(role),
-                        content=content,
-                        created_at=datetime.fromisoformat(created_at),
-                    )
-                )
+            messages = tuple(decode_message(row) for row in rows)
         except (TypeError, ValueError) as exc:
             raise ConversationRepositoryError(
                 "Invalid persisted conversation message."

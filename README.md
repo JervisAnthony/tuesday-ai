@@ -465,6 +465,115 @@ does not necessarily interrupt an already-running database worker or transaction
 No automatic cancellation rollback or request-level exactly-once persistence is
 provided.
 
+## Read-only conversation history queries
+
+`BaseConversationHistoryReader` is a separate asynchronous query boundary with
+`list_conversations(*, limit=50, offset=0)` and
+`get_messages(conversation_id, *, limit=50, offset=0)`. The existing write
+repository contract remains unchanged. `InMemoryConversationRepository` implements
+both boundaries over its existing stored message tuples:
+
+```python
+import asyncio
+from uuid import uuid4
+
+from tuesday.conversations import InMemoryConversationRepository
+from tuesday.domain import ConversationMessage, MessageRole
+
+repository = InMemoryConversationRepository()
+conversation_id = uuid4()
+
+
+async def inspect_memory():
+    await repository.append_messages(
+        conversation_id,
+        (ConversationMessage(MessageRole.USER, "/chat Hello"),),
+    )
+    conversations = await repository.list_conversations(limit=10)
+    messages = await repository.get_messages(conversation_id, limit=10)
+    return conversations, messages
+
+
+conversation_page, message_page = asyncio.run(inspect_memory())
+```
+
+To inspect an existing SQLite file without initializing or modifying its storage,
+construct `SQLiteConversationHistoryReader` explicitly:
+
+```python
+from pathlib import Path
+
+from tuesday.conversations import SQLiteConversationHistoryReader
+
+reader = SQLiteConversationHistoryReader(
+    Path("/caller-selected/location/existing-conversations.sqlite3")
+)
+```
+
+Replace the example with an existing compatible database. Construction validates
+and resolves the path once without opening a connection. Queries use `mode=ro`
+connections, a five-second lock timeout, and `asyncio.to_thread`; each worker
+creates, uses, and closes its own connection. The reader does not construct a
+write repository, create databases or parent directories, add tables/indexes, change
+`user_version`, or repair missing/corrupt storage. It checks the same table column
+layout as the write backend, without a comprehensive schema audit.
+
+Conversation listings return a frozen `ConversationSummaryPage` with an `items`
+tuple. Each `ConversationSummary` contains `conversation_id`, `message_count`,
+`first_message_at`, and `last_message_at`. Conversations are ordered by first
+successful append, oldest first; later appends do not move an existing
+conversation. The timestamps belong to the first and last **appended** messages,
+so a backdated final message can have a timestamp earlier than the first. They
+are not the minimum and maximum timestamp values, and no content summaries or
+generated metadata are added.
+
+Message queries return a frozen `ConversationMessagePage` with `conversation_id`
+and a `messages` tuple of existing domain message values. Append order, roles,
+UUIDs (including duplicates), exact content, whitespace, Unicode, timestamp
+offsets, and microseconds are preserved. Unknown conversation IDs return empty
+pages without creating listed conversations. The SQLite reader reconstructs
+values; Python object identity and named timezone objects are not preserved.
+
+Both page types include `limit`, `offset`, and `next_offset`. Limit defaults to
+50 and must be an actual integer from 1 through 200. Offset defaults to zero and
+must be an actual nonnegative integer no larger than `2**63 - 1`. Booleans and
+noninteger values are rejected before database access. An offset beyond the
+available results returns an empty page. One-item lookahead determines whether
+another page exists, without returning that extra item. When more results exist,
+`next_offset` is the current offset plus the number of returned items; otherwise
+it is `None`. Message pages do not include a transcript-wide total count.
+
+Follow `next_offset` explicitly when consuming further pages:
+
+```python
+async def inspect_existing(reader, conversation_id):
+    listing = await reader.list_conversations(limit=20)
+    offset = 0
+    while True:
+        page = await reader.get_messages(conversation_id, limit=50, offset=offset)
+        for message in page.messages:
+            print(message.role, message.content)
+        if page.next_offset is None:
+            break
+        offset = page.next_offset
+    return listing
+```
+
+SQLite applies limit, offset, and lookahead in SQL. Listing uses counts and
+first/last append metadata without retrieving full message bodies. Memory builds
+summaries only for the selected conversation page. Returned pages remain
+immutable snapshots after subsequent writes, but separate page requests query
+current committed data and do not form a frozen multi-call snapshot. Concurrent
+external writers can change results between calls; read-only access does not
+prevent those writes.
+
+Invalid inputs raise `TypeError` or `ValueError`. Expected SQLite failures and
+malformed returned records raise `ConversationRepositoryError` with exception
+chaining. Missing storage is not recreated, malformed records are not skipped,
+and failed queries are not retried. Validation covers the returned page and its
+needed summary fields, not a global audit of every stored record. These are
+programmatic queries; no terminal history commands are introduced here.
+
 ## Stateful conversation service
 
 `StatefulConversationService` owns the application-level interaction lifecycle
