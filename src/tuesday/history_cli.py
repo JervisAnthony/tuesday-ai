@@ -7,6 +7,11 @@ import sys
 from collections.abc import Sequence
 from uuid import UUID
 
+from tuesday.conversation_export import (
+    collect_transcript,
+    publish_transcript,
+    render_transcript,
+)
 from tuesday.conversations import (
     ConversationMessagePage,
     ConversationRepositoryError,
@@ -26,22 +31,37 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="tuesday history",
-        description="Inspect one page of existing SQLite conversation history.",
+        description="Inspect pages or export an existing SQLite conversation.",
         allow_abbrev=False,
     )
     commands = parser.add_subparsers(dest="command", required=True)
     for command, description in (
         ("list", "List conversations in first-append order."),
         ("show", "Show one conversation's messages in append order."),
+        ("export", "Export a complete conversation as JSON or Markdown."),
     ):
         child = commands.add_parser(
             command, help=description, description=description, allow_abbrev=False
         )
-        if command == "show":
+        if command != "list":
             child.add_argument("conversation_id", type=UUID, metavar="UUID")
         child.add_argument(
             "--database", required=True, metavar="PATH", help="existing SQLite file"
         )
+        if command == "export":
+            child.add_argument(
+                "--format",
+                choices=("json", "markdown"),
+                default="json",
+                help="export representation; default json",
+            )
+            child.add_argument(
+                "--output", metavar="PATH", help="explicit destination file"
+            )
+            child.add_argument(
+                "--overwrite", action="store_true", help="replace --output if it exists"
+            )
+            continue
         child.add_argument(
             "--limit", type=int, default=50, metavar="N", help="1–200; default 50"
         )
@@ -116,20 +136,46 @@ def _format_page(
     return "\n\n".join(sections)
 
 
+def _export(reader: SQLiteConversationHistoryReader, args: argparse.Namespace) -> int:
+    transcript = asyncio.run(collect_transcript(reader, args.conversation_id))
+    document = render_transcript(transcript, args.format)
+    try:
+        if args.output is None:
+            sys.stdout.write(document)
+            sys.stdout.flush()
+        else:
+            publish_transcript(
+                document,
+                database=args.database,
+                output=args.output,
+                overwrite=args.overwrite,
+            )
+    except (OSError, UnicodeError):
+        print("tuesday: transcript output failed.", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Read and fully format one page before writing successful stdout."""
+    """Inspect a page or export a fully prepared conversation document."""
     try:
         parser = _parser()
         args = parser.parse_args(argv)
-        try:
-            _validate_pagination(args.limit, args.offset)
-        except ValueError:
-            parser.error("Invalid pagination.")
+        if args.command == "export":
+            if args.overwrite and args.output is None:
+                parser.error("--overwrite requires --output.")
+        else:
+            try:
+                _validate_pagination(args.limit, args.offset)
+            except ValueError:
+                parser.error("Invalid pagination.")
         try:
             reader = SQLiteConversationHistoryReader(args.database)
         except (TypeError, ValueError):
             print("tuesday: invalid database path.", file=sys.stderr)
             return 1
+        if args.command == "export":
+            return _export(reader, args)
         if args.command == "list":
             page = asyncio.run(
                 reader.list_conversations(limit=args.limit, offset=args.offset)

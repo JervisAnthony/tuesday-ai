@@ -11,13 +11,14 @@ import pytest
 
 import tuesday.cli as cli
 import tuesday.history_cli as history_cli
+from tuesday.conversation_export import render_transcript
 from tuesday.conversations import (
     ConversationMessagePage,
     ConversationRepositoryError,
     ConversationSummary,
     ConversationSummaryPage,
 )
-from tuesday.domain import ConversationMessage, MessageRole
+from tuesday.domain import ConversationContext, ConversationMessage, MessageRole
 
 A, B, MESSAGE_ID = UUID(int=481), UUID(int=482), UUID(int=1)
 STAMP = datetime.fromisoformat("2026-11-26T12:30:45.123456+05:30")
@@ -385,3 +386,238 @@ def test_import_does_not_parse_construct_or_execute(reader, monkeypatch):
     importlib.reload(history_cli)
     parse.assert_not_called()
     reader[1].assert_not_called()
+
+
+@pytest.fixture
+def export_reader(reader):
+    instance, factory = reader
+    messages = instance.get_messages.return_value.messages
+    instance.get_messages.return_value = ConversationMessagePage(
+        A, messages, 200, 0, None
+    )
+    return instance, factory, ConversationContext(A, messages)
+
+
+@pytest.mark.parametrize("format", [None, "json", "markdown"])
+def test_export_stdout_has_exact_completed_document(export_reader, capsys, format):
+    instance, factory, transcript = export_reader
+    options = [] if format is None else ["--format", format]
+    assert (
+        cli.main(["history", "export", str(A), "--database", "explicit.db", *options])
+        == 0
+    )
+    factory.assert_called_once_with("explicit.db")
+    instance.get_messages.assert_awaited_once_with(A, limit=200, offset=0)
+    instance.list_conversations.assert_not_called()
+    assert capsys.readouterr() == (render_transcript(transcript, format or "json"), "")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        [],
+        [str(A)],
+        [str(A), "--database"],
+        ["invalid-private-uuid", "--database", "private.db"],
+        [str(A), str(B), "--database", "private.db"],
+    ]
+    + [
+        [str(A), "--database", "private.db", *options]
+        for options in (
+            ["--overwrite"],
+            ["--format", "xml"],
+            ["--format"],
+            ["--output"],
+            ["--limit", "1"],
+            ["--offset", "0"],
+            ["--json"],
+            ["--runtime", "openai"],
+            ["--interactive"],
+            ["--max-history-messages", "1"],
+            ["--conversation-id", str(A)],
+            ["--out", "private.txt"],
+            ["--over"],
+            ["--for", "json"],
+            ["--unknown"],
+        )
+    ],
+)
+def test_export_syntax_is_validated_before_reader_construction(reader, capsys, bad):
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["history", "export", *bad])
+    assert caught.value.code == 2
+    reader[1].assert_not_called()
+    assert capsys.readouterr() == ("", ARGUMENT_ERROR)
+
+
+def test_export_help_requires_no_reader_or_database(reader, capsys):
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["history", "export", "--help"])
+    assert caught.value.code == 0
+    reader[1].assert_not_called()
+    output = capsys.readouterr()
+    assert output.err == ""
+    for word in ("UUID", "--database", "--format", "--output", "--overwrite"):
+        assert word in output.out
+    for word in ("--limit", "--offset", "--json", "--runtime"):
+        assert word not in output.out
+
+
+@pytest.mark.parametrize("format", ["json", "markdown"])
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_export_file_is_quiet_utf8_and_default_conflict_preserves_bytes(
+    export_reader, capsys, tmp_path, format, overwrite
+):
+    destination = tmp_path / "transcript.txt"
+    if overwrite:
+        destination.write_bytes(b"old destination")
+    options = [
+        "history",
+        "export",
+        str(A),
+        "--database",
+        "explicit.db",
+        "--format",
+        format,
+        "--output",
+        str(destination),
+        *(["--overwrite"] if overwrite else []),
+    ]
+    assert cli.main(options) == 0
+    expected = render_transcript(export_reader[2], format).encode("utf-8")
+    assert destination.read_bytes() == expected
+    assert capsys.readouterr() == ("", "")
+    if not overwrite:
+        assert cli.main(options) == 1
+        assert capsys.readouterr() == ("", "tuesday: transcript output failed.\n")
+        assert destination.read_bytes() == expected
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure_stage", ["later-read", "render"])
+def test_failed_preparation_never_opens_or_changes_destination(
+    export_reader, monkeypatch, capsys, tmp_path, existing, failure_stage
+):
+    instance, _, _ = export_reader
+    destination = tmp_path / "transcript.txt"
+    if existing:
+        destination.write_bytes(b"existing bytes")
+    if failure_stage == "later-read":
+        instance.get_messages.side_effect = [
+            ConversationMessagePage(
+                A, instance.get_messages.return_value.messages, 200, 0, 2
+            ),
+            ConversationRepositoryError("private data"),
+        ]
+    else:
+        monkeypatch.setattr(
+            history_cli, "render_transcript", Mock(side_effect=ValueError("bug"))
+        )
+    publish = Mock(side_effect=AssertionError("No file may be opened"))
+    monkeypatch.setattr(history_cli, "publish_transcript", publish)
+    options = [
+        "history",
+        "export",
+        str(A),
+        "--database",
+        "db",
+        "--output",
+        str(destination),
+        "--overwrite",
+    ]
+    if failure_stage == "later-read":
+        assert cli.main(options) == 1
+        assert capsys.readouterr() == ("", "tuesday: conversation storage failed.\n")
+        assert instance.get_messages.await_count == 2
+    else:
+        with pytest.raises(ValueError, match="bug"):
+            cli.main(options)
+        assert capsys.readouterr() == ("", "")
+    publish.assert_not_called()
+    assert (
+        destination.read_bytes() == b"existing bytes"
+        if existing
+        else not destination.exists()
+    )
+
+
+@pytest.mark.parametrize("stage", ["read", "render", "publish", "stdout"])
+def test_export_interruption_returns_130_without_retry(
+    export_reader, monkeypatch, capsys, stage
+):
+    instance, _, _ = export_reader
+    options = ["history", "export", str(A), "--database", "db"]
+    operation = Mock(side_effect=KeyboardInterrupt())
+    if stage == "read":
+        operation = instance.get_messages
+        operation.side_effect = KeyboardInterrupt()
+    elif stage == "render":
+        monkeypatch.setattr(history_cli, "render_transcript", operation)
+    elif stage == "publish":
+        monkeypatch.setattr(history_cli, "publish_transcript", operation)
+        options += ["--output", "explicit.txt"]
+    else:
+        monkeypatch.setattr(history_cli.sys.stdout, "write", operation)
+    assert cli.main(options) == 130
+    operation.assert_called_once()
+    assert capsys.readouterr() == ("", "tuesday: interrupted.\n")
+
+
+@pytest.mark.parametrize("stage", ["read", "render", "publish"])
+@pytest.mark.parametrize("error_type", [TypeError, ValueError, RuntimeError])
+def test_export_internal_failures_propagate(
+    export_reader, monkeypatch, capsys, stage, error_type
+):
+    instance, _, _ = export_reader
+    failure = error_type("programming defect")
+    operation = Mock(side_effect=failure)
+    options = ["history", "export", str(A), "--database", "db"]
+    if stage == "read":
+        operation = instance.get_messages
+        operation.side_effect = failure
+    elif stage == "render":
+        monkeypatch.setattr(history_cli, "render_transcript", operation)
+    else:
+        monkeypatch.setattr(history_cli, "publish_transcript", operation)
+        options += ["--output", "explicit.txt"]
+    with pytest.raises(error_type) as caught:
+        cli.main(options)
+    assert caught.value is failure
+    operation.assert_called_once()
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("file_output", [False, True])
+@pytest.mark.parametrize("error_type", [OSError, UnicodeError])
+def test_export_output_failures_are_private_and_scoped_to_io(
+    export_reader, monkeypatch, capsys, file_output, error_type
+):
+    operation = Mock(side_effect=error_type("private path or document"))
+    options = ["history", "export", str(A), "--database", "db"]
+    if file_output:
+        monkeypatch.setattr(history_cli, "publish_transcript", operation)
+        options += ["--output", "explicit.txt"]
+    else:
+        monkeypatch.setattr(history_cli.sys.stdout, "write", operation)
+    assert cli.main(options) == 1
+    operation.assert_called_once()
+    assert capsys.readouterr() == ("", "tuesday: transcript output failed.\n")
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_export_flush_failures_are_handled_after_one_write(
+    export_reader, monkeypatch, capsys, interrupted
+):
+    write = Mock()
+    error = KeyboardInterrupt() if interrupted else OSError("private stdout detail")
+    flush = Mock(side_effect=error)
+    with monkeypatch.context() as patch:
+        patch.setattr(history_cli.sys.stdout, "write", write)
+        patch.setattr(history_cli.sys.stdout, "flush", flush)
+        assert cli.main(["history", "export", str(A), "--database", "db"]) == (
+            130 if interrupted else 1
+        )
+    write.assert_called_once_with(render_transcript(export_reader[2]))
+    flush.assert_called_once()
+    expected = "interrupted." if interrupted else "transcript output failed."
+    assert capsys.readouterr() == ("", f"tuesday: {expected}\n")

@@ -15,8 +15,9 @@ from uuid import UUID
 import pytest
 
 from tuesday.cli import main
+from tuesday.conversation_export import render_transcript
 from tuesday.conversations import SQLiteConversationRepository
-from tuesday.domain import ConversationMessage, MessageRole
+from tuesday.domain import ConversationContext, ConversationMessage, MessageRole
 
 A, B, UNKNOWN, MESSAGE_ID = (UUID(int=value) for value in (481, 482, 499, 1))
 STAMP = datetime.fromisoformat("2026-11-26T12:30:45.123456+05:30")
@@ -292,6 +293,7 @@ def test_real_invalid_path_configuration_uses_exit_one(tmp_path, path):
         ["history", "--help"],
         ["history", "list", "--help"],
         ["history", "show", "--help"],
+        ["history", "export", "--help"],
     ],
 )
 def test_real_help_without_storage_or_valid_model_configuration(
@@ -346,8 +348,9 @@ def test_listed_uuid_can_resume_existing_conversation_command(tmp_path, capsys):
     )
 
 
+@pytest.mark.parametrize("command", ["list", "export"])
 def test_clean_imports_and_history_execution_never_activate_application_layers(
-    tmp_path,
+    tmp_path, command
 ):
     script = """
 import sys
@@ -368,18 +371,274 @@ for component in (SQLiteConversationRepository, models.OpenAILanguageModelProvid
     agents.ModelBackedConversationalAgent, agents.GuardedOpenAIConversationalAgent,
     OpenAIToolTurnService, BasicCalculatorTool):
     component.__init__ = forbidden
-assert cli.main(["history", "list", "--database", sys.argv[1], "--json"]) == 0
+arguments = ["history", sys.argv[2]]
+if sys.argv[2] == "export":
+    arguments += ["00000000-0000-0000-0000-000000000049"]
+else:
+    arguments += ["--json"]
+assert cli.main([*arguments, "--database", sys.argv[1]]) == 0
 """
     path = tmp_path / "empty.sqlite3"
     SQLiteConversationRepository(path)
     before = path.read_bytes()
     result = subprocess.run(
-        [sys.executable, "-c", script, str(path)],
+        [sys.executable, "-c", script, str(path), command],
         cwd=tmp_path,
         capture_output=True,
         text=True,
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stderr == "" and json.loads(result.stdout)["items"] == []
+    key = "items" if command == "list" else "messages"
+    assert result.stderr == "" and json.loads(result.stdout)[key] == []
     assert path.read_bytes() == before
+
+
+@pytest.fixture
+def export_database(database):
+    path, original = database
+    messages = original + tuple(
+        ConversationMessage(
+            MessageRole.USER,
+            f"  /conversation Message {index}\t\n# Heading\n<html>\n````md\n```  ",
+            MESSAGE_ID,
+            STAMP - timedelta(seconds=index),
+        )
+        for index in range(3, 501)
+    )
+    asyncio.run(SQLiteConversationRepository(path).append_messages(A, messages[3:]))
+    return path, ConversationContext(A, messages)
+
+
+@pytest.mark.parametrize("launcher", ["module", "installed"])
+@pytest.mark.parametrize("format", ["json", "markdown"])
+def test_real_export_stdout_collects_multiple_pages_and_preserves_source(
+    tmp_path, export_database, launcher, format
+):
+    path, transcript = export_database
+    before_bytes, before_state = path.read_bytes(), inspect_database(path)
+    before_files = set(tmp_path.iterdir())
+    options = [] if format == "json" else ["--format", "markdown"]
+    result = invoke(
+        tmp_path,
+        launcher,
+        "history",
+        "export",
+        str(A),
+        "--database",
+        str(path),
+        *options,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == "" and result.stdout.endswith("\n")
+    if format == "json":
+        payload = json.loads(result.stdout)
+        assert set(payload) == {"format", "version", "conversation_id", "messages"}
+        assert (
+            payload["format"] == "tuesday.conversation"
+            and type(payload["version"]) is int
+        )
+        assert payload["version"] == 1 and payload["conversation_id"] == str(A)
+        assert payload["messages"] == [
+            {
+                "message_id": str(message.message_id),
+                "role": message.role.value,
+                "content": message.content,
+                "created_at": message.created_at.isoformat(),
+            }
+            for message in transcript.messages
+        ]
+        assert result.stdout == json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    else:
+        assert result.stdout == render_transcript(transcript, "markdown")
+        assert "Messages: 501\n" in result.stdout
+        assert result.stdout.count("\n## Message ") == 501
+        assert "`````text\n" in result.stdout
+        for message in transcript.messages:
+            assert message.content in result.stdout
+    assert path.read_bytes() == before_bytes and inspect_database(path) == before_state
+    assert set(tmp_path.iterdir()) == before_files
+
+
+@pytest.mark.parametrize("launcher", ["module", "installed"])
+@pytest.mark.parametrize("format", ["json", "markdown"])
+def test_real_file_export_no_clobber_and_explicit_overwrite(
+    tmp_path, export_database, launcher, format
+):
+    path, transcript = export_database
+    before_bytes, before_state = path.read_bytes(), inspect_database(path)
+    destination = tmp_path / "transcript.txt"
+    options = [
+        "history",
+        "export",
+        str(A),
+        "--database",
+        str(path),
+        "--format",
+        format,
+        "--output",
+        str(destination),
+    ]
+    result = invoke(tmp_path, launcher, *options)
+    assert result.returncode == 0 and result.stdout == result.stderr == ""
+    expected = render_transcript(transcript, format).encode("utf-8")
+    assert destination.read_bytes() == expected
+    assert b"\r\n" not in expected and not expected.startswith(b"\xef\xbb\xbf")
+    result = invoke(tmp_path, launcher, *options)
+    assert result.returncode == 1 and result.stdout == ""
+    assert result.stderr == "tuesday: transcript output failed.\n"
+    assert destination.read_bytes() == expected
+    destination.write_bytes(b"previous destination bytes")
+    result = invoke(tmp_path, launcher, *options, "--overwrite")
+    assert result.returncode == 0 and result.stdout == result.stderr == ""
+    assert destination.read_bytes() == expected
+    assert path.read_bytes() == before_bytes and inspect_database(path) == before_state
+    assert not list(tmp_path.glob(".tuesday-transcript-*"))
+
+
+@pytest.mark.parametrize("launcher", ["module", "installed"])
+@pytest.mark.parametrize("format", ["json", "markdown"])
+def test_real_unknown_conversation_exports_a_valid_empty_document(
+    tmp_path, database, launcher, format
+):
+    path, _ = database
+    result = invoke(
+        tmp_path,
+        launcher,
+        "history",
+        "export",
+        str(UNKNOWN),
+        "--database",
+        str(path),
+        "--format",
+        format,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    if format == "json":
+        assert json.loads(result.stdout) == {
+            "format": "tuesday.conversation",
+            "version": 1,
+            "conversation_id": str(UNKNOWN),
+            "messages": [],
+        }
+    else:
+        assert result.stdout == (
+            f"# Conversation transcript\n\nConversation: {UNKNOWN}\n"
+            "Format: tuesday.conversation\nVersion: 1\nMessages: 0\n"
+        )
+
+
+@pytest.mark.parametrize("failure", ["missing", "corrupt", "later-page"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_real_failed_export_never_creates_or_replaces_destination(
+    tmp_path, export_database, failure, existing
+):
+    path, _ = export_database
+    if failure == "missing":
+        path = tmp_path / "missing" / "private.sqlite3"
+    elif failure == "corrupt":
+        path.write_bytes(b"private corrupt database")
+    else:
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute(
+                "UPDATE tuesday_conversation_messages SET created_at=? "
+                "WHERE sequence=502",
+                ("private invalid last-page timestamp",),
+            )
+    destination = tmp_path / "transcript.txt"
+    if existing:
+        destination.write_bytes(b"original output bytes")
+    before = path.read_bytes() if path.exists() else None
+    result = invoke(
+        tmp_path,
+        "module",
+        "history",
+        "export",
+        str(A),
+        "--database",
+        str(path),
+        "--output",
+        str(destination),
+        "--overwrite",
+    )
+    assert result.returncode == 1 and result.stdout == ""
+    assert result.stderr == "tuesday: conversation storage failed.\n"
+    assert (
+        destination.read_bytes() == b"original output bytes"
+        if existing
+        else not destination.exists()
+    )
+    if before is None:
+        assert not path.exists() and not path.parent.exists()
+    else:
+        assert path.read_bytes() == before
+    assert not list(tmp_path.glob(".tuesday-transcript-*"))
+
+
+@pytest.mark.parametrize("suffix", ["", "-wal", "-shm", "-journal"])
+def test_real_export_rejects_source_and_sidecar_destinations(
+    tmp_path, database, suffix
+):
+    path, _ = database
+    destination = str(path) + suffix
+    before = path.read_bytes()
+    result = invoke(
+        tmp_path,
+        "module",
+        "history",
+        "export",
+        str(A),
+        "--database",
+        str(path),
+        "--output",
+        destination,
+        "--overwrite",
+    )
+    assert result.returncode == 1 and result.stdout == ""
+    assert result.stderr == "tuesday: transcript output failed.\n"
+    assert path.read_bytes() == before
+    if suffix:
+        assert not os.path.exists(destination)
+
+
+def test_real_export_missing_output_parent_stays_missing(tmp_path, database):
+    path, _ = database
+    destination = tmp_path / "missing" / "transcript.json"
+    result = invoke(
+        tmp_path,
+        "installed",
+        "history",
+        "export",
+        str(A),
+        "--database",
+        str(path),
+        "--output",
+        str(destination),
+    )
+    assert result.returncode == 1 and result.stdout == ""
+    assert result.stderr == "tuesday: transcript output failed.\n"
+    assert not destination.parent.exists()
+
+
+def test_clean_export_imports_do_not_parse_connect_or_create_files(tmp_path):
+    script = """
+import argparse, os, sqlite3, tempfile
+def forbidden(*args, **kwargs):
+    raise AssertionError("Import must not parse, connect, execute, or write")
+argparse.ArgumentParser.parse_args = forbidden
+sqlite3.connect = tempfile.NamedTemporaryFile = forbidden
+os.link = os.replace = forbidden
+import tuesday.conversation_export
+import tuesday.history_cli
+import tuesday.cli
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == result.stderr == ""
+    assert list(tmp_path.iterdir()) == []
