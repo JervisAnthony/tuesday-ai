@@ -128,6 +128,10 @@ def test_json_uses_actual_response_and_one_real_stateful_invocation(
         ["--runtime", "openai", "--max-history-messages"],
         ["--max-history-messages", "0", "/chat Hello"],
         ["--runtime", "deterministic", "--max-history-messages", "2", "/chat Hello"],
+        ["--interactive", "/chat Hello"],
+        ["--interactive", "--json"],
+        ["--interactive", "--runtime", "openai", "--json"],
+        ["--interactive", "--max-history-messages", "0"],
     ],
 )
 def test_argument_failures_exit_two_before_runtime_or_database_creation(
@@ -162,8 +166,9 @@ def test_argument_failures_exit_two_before_runtime_or_database_creation(
 
 @pytest.mark.parametrize("option", ["-h", "--help", "--version"])
 @pytest.mark.parametrize("runtime", ["deterministic", "openai"])
+@pytest.mark.parametrize("interactive", [False, True])
 def test_help_and_version_exit_zero_without_constructing_runtime(
-    monkeypatch, capsys, tmp_path, option, runtime
+    monkeypatch, capsys, tmp_path, option, runtime, interactive
 ):
     for name in (
         "InMemoryConversationRepository",
@@ -176,7 +181,16 @@ def test_help_and_version_exit_zero_without_constructing_runtime(
         monkeypatch.setattr(cli, name, Mock(side_effect=AssertionError("No runtime")))
     path = tmp_path / "not-created.db"
     with pytest.raises(SystemExit) as caught:
-        cli.main(["--runtime", runtime, "--database", str(path), option])
+        cli.main(
+            [
+                "--runtime",
+                runtime,
+                "--database",
+                str(path),
+                *(["--interactive"] if interactive else []),
+                option,
+            ]
+        )
     assert caught.value.code == 0
     output = capsys.readouterr()
     assert output.err == ""

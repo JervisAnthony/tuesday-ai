@@ -34,11 +34,12 @@ CONVERSATION_ID = "00000000-0000-0000-0000-000000000044"
 OTHER_ID = "00000000-0000-0000-0000-000000000045"
 
 
-def invoke(tmp_path, *arguments, env=None):
+def invoke(tmp_path, *arguments, env=None, input_text=None):
     return subprocess.run(
         [sys.executable, "-m", "tuesday", *arguments],
         cwd=tmp_path,
         env=env,
+        input=input_text,
         capture_output=True,
         text=True,
         timeout=30,
@@ -212,6 +213,7 @@ def forbidden(*args, **kwargs):
 sqlite3.connect = forbidden
 socket.create_connection = forbidden
 argparse.ArgumentParser.parse_args = forbidden
+import tuesday.terminal_session
 import tuesday.composition
 import tuesday.config
 import tuesday.services.conversation
@@ -221,6 +223,7 @@ tuesday.services.conversation.StatefulConversationService = forbidden
 sys.argv = ["unrelated-program", "--unknown-option"]
 import tuesday
 import tuesday.cli
+import tuesday.terminal_session
 import tuesday.__main__
 assert tuesday.__all__ == ["__version__"]
 """
@@ -475,3 +478,122 @@ def test_cleanup_failure_does_not_undo_a_committed_model_turn(
     ]
     model_sdk.create.assert_awaited_once()
     model_sdk.clients[0].close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("launcher", ["module", "installed"])
+@pytest.mark.parametrize("ending", ["", ":exit\n/chat Not processed\n"])
+def test_actual_interactive_entry_points_use_scripted_stdin_and_clean_stdout(
+    tmp_path, launcher, ending
+):
+    arguments = ["--interactive", "--conversation-id", CONVERSATION_ID]
+    source = "/chat Hello\n/conversation Continue\n" + ending
+    if launcher == "module":
+        result = invoke(tmp_path, *arguments, input_text=source)
+    else:
+        executable = shutil.which("tuesday", path=sysconfig.get_path("scripts"))
+        assert executable is not None
+        result = subprocess.run(
+            [executable, *arguments],
+            input=source,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (
+        "TUESDAY received: Hello\n"
+        "TUESDAY received: Continue (2 prior messages in context)\n"
+    )
+    assert CONVERSATION_ID in result.stderr
+    assert "tuesday>" not in result.stderr
+    assert "Hello" not in result.stderr and "Continue" not in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_interactive_process_switches_and_recovers_conversations(tmp_path):
+    source = (
+        "/chat First\n:new\n/chat New conversation\n"
+        f":use {CONVERSATION_ID}\n/conversation Back\n:use {OTHER_ID}\n"
+        "/chat Unknown selection\n:help\n:id\n:exit\n"
+    )
+    result = invoke(
+        tmp_path,
+        "--interactive",
+        "--conversation-id",
+        CONVERSATION_ID,
+        input_text=source,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (
+        "TUESDAY received: First\nTUESDAY received: New conversation\n"
+        "TUESDAY received: Back (2 prior messages in context)\n"
+        "TUESDAY received: Unknown selection\n"
+    )
+    assert ":use UUID" in result.stderr
+    assert "tuesday>" not in result.stderr
+
+
+def test_interactive_sqlite_history_survives_separate_session_processes(tmp_path):
+    path = tmp_path / "interactive-history.sqlite3"
+    first = invoke(
+        tmp_path,
+        "--interactive",
+        "--database",
+        str(path),
+        input_text="/chat First question\n:exit\n",
+    )
+    assert first.returncode == 0, first.stderr
+    identifier = first.stderr.strip().removeprefix("Conversation: ")
+    assert str(UUID(identifier)) == identifier
+    second = invoke(
+        tmp_path,
+        "--interactive",
+        "--database",
+        str(path),
+        "--conversation-id",
+        identifier,
+        input_text="/conversation Second question\n",
+    )
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == "TUESDAY received: First question\n"
+    answer = "TUESDAY received: Second question (2 prior messages in context)"
+    assert second.stdout == answer + "\n"
+    assert [
+        (message.role, message.content)
+        for message in history(path, identifier).messages
+    ] == [
+        (MessageRole.USER, "/chat First question"),
+        (MessageRole.ASSISTANT, "TUESDAY received: First question"),
+        (MessageRole.USER, "/conversation Second question"),
+        (MessageRole.ASSISTANT, answer),
+    ]
+
+
+def test_scripted_session_errors_recover_without_persisting_failed_turns(
+    tmp_path,
+):
+    path = tmp_path / "session-errors.sqlite3"
+    source = (
+        ":use private-bad-id\n:unknown private\n/unknown private\n/chat\n/chat Saved\n"
+    )
+    result = invoke(
+        tmp_path,
+        "--interactive",
+        "--database",
+        str(path),
+        "--conversation-id",
+        CONVERSATION_ID,
+        input_text=source,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "TUESDAY received: Saved\n"
+    assert result.stderr.count("tuesday:") == 4
+    assert "private" not in result.stderr
+    assert [
+        (message.role, message.content)
+        for message in history(path, CONVERSATION_ID).messages
+    ] == [
+        (MessageRole.USER, "/chat Saved"),
+        (MessageRole.ASSISTANT, "TUESDAY received: Saved"),
+    ]
