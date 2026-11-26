@@ -328,8 +328,10 @@ def test_memory_module_has_domain_and_repository_dependencies_only() -> None:
     }
 
     assert imported_modules == {
+        "itertools",
         "uuid",
         "tuesday.conversations.base",
+        "tuesday.conversations.history",
         "tuesday.domain",
     }
 
