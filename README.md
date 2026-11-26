@@ -715,6 +715,137 @@ tuesday --interactive --database /caller-selected/location/history.sqlite3 --con
 These commands can append successful turns through the ordinary writable
 conversation runtime. The separate `history` commands only inspect data.
 
+### Conversation transcript export
+
+Export a selected conversation through either entry point:
+
+```text
+python -m tuesday history export 00000000-0000-0000-0000-000000000049 --database /caller-selected/location/history.sqlite3
+tuesday history export 00000000-0000-0000-0000-000000000049 --database /caller-selected/location/history.sqlite3 --format json
+tuesday history export 00000000-0000-0000-0000-000000000049 --database /caller-selected/location/history.sqlite3 --format markdown
+tuesday history export --help
+```
+
+The UUID and explicit `--database PATH` are required. `--format {json,markdown}`
+defaults to `json`. Unlike `history show`, which returns one selected page,
+`history export` collects the conversation by requesting pages of 200 messages,
+starting at offset zero and following each returned `next_offset` until `None`.
+It preserves reader order, repeated message UUIDs, and backdated timestamps.
+Conversation/page correlation and pagination progress are checked; inconsistent
+pages fail instead of looping or exporting a different conversation.
+An unknown conversation UUID produces a valid empty transcript.
+
+Export does not accept `--limit`, `--offset`, `--json`, runtime, provider,
+interactive, or model-history options. Syntax, UUID, format, and option
+combinations are validated before reader construction. Help requires no database
+or model configuration. Export uses the existing read-only query boundary
+without SQL, writable repository construction, settings loading, or application
+and model execution.
+
+JSON is a deterministic, two-space-indented document with one final newline.
+Its exact version-one envelope is:
+
+```json
+{
+  "format": "tuesday.conversation",
+  "version": 1,
+  "conversation_id": "00000000-0000-0000-0000-000000000049",
+  "messages": [
+    {
+      "message_id": "00000000-0000-0000-0000-000000000001",
+      "role": "user",
+      "content": "/chat Original content",
+      "created_at": "2026-11-27T12:30:45.123456+05:30"
+    }
+  ]
+}
+```
+
+`version` is the integer `1`. UUIDs are strings, roles use their existing values,
+and timestamps use `isoformat()`, preserving offsets and microseconds. Decoding
+JSON recovers exact content, including Unicode, original directives, multiline
+text, tabs, and trailing whitespace. An empty transcript has `"messages": []`.
+The envelope includes no current export timestamp, pagination fields,
+request/response identifiers, or generated metadata. This is a conversation
+document, not a complete application or database backup.
+
+Markdown is a readable representation with this structure:
+
+````text
+# Conversation transcript
+
+Conversation: 00000000-0000-0000-0000-000000000049
+Format: tuesday.conversation
+Version: 1
+Messages: 1
+
+## Message 1
+
+Role: user
+Message: 00000000-0000-0000-0000-000000000001
+Created at: 2026-11-27T12:30:45.123456+05:30
+
+```text
+/chat Original content
+```
+````
+
+Message sections are numbered in append order. Content is inserted verbatim
+inside literal `text` fences. Each fence has at least three backticks and is
+longer than every backtick run in that message, so stored fences, headings, or
+HTML remain content rather than transcript structure. A delimiter newline is
+added before each closing fence; existing content whitespace is retained.
+Empty Markdown transcripts retain the header, UUID, version, and `Messages: 0`.
+JSON is the structured preservation format; Markdown is not a round-trip import
+format. Neither format adds inferred titles or content summaries.
+
+By default, the entire document is prepared and emitted once to stdout, without
+banners or progress messages. To write a file instead, supply `--output PATH`:
+
+```text
+tuesday history export 00000000-0000-0000-0000-000000000049 --database /caller-selected/location/history.sqlite3 --format json --output transcript.json
+tuesday history export 00000000-0000-0000-0000-000000000049 --database /caller-selected/location/history.sqlite3 --format markdown --output transcript.md --overwrite
+```
+
+File output is quiet: successful exports leave both stdout and stderr empty.
+Files use UTF-8 without a BOM and LF document separators; literal Markdown
+content retains its original line endings. Missing destination directories are
+not created. The complete transcript must be read and rendered before any
+destination file is opened for writing.
+
+Existing destinations are refused by default. A complete temporary file is
+written and closed in the destination directory, then published with a hard
+link that refuses an existing destination even if it appeared during export.
+This strategy requires filesystem hard-link support; unsupported publication
+fails without falling back to an overwrite. `--overwrite` requires `--output`:
+it prepares and closes the same-directory temporary file, then replaces the
+destination using `os.replace`. Preparation or failed replacement leaves an
+existing destination intact. Cleanup attempts remove only temporary files owned
+by the operation and are best effort.
+
+The source database and its resolved `-wal`, `-shm`, and `-journal` paths cannot
+be export destinations, even with `--overwrite`. Relative/resolved aliases are
+checked, and existing hard-link aliases are rejected using same-file checks.
+Symbolic-link destinations are rejected rather than followed for writing.
+These checks protect the source and output links; they are not a general
+filesystem sandbox or a filesystem crash-durability guarantee.
+
+Exit status `0` means success, an empty transcript, or help; `1` means an expected
+storage/path failure, destination conflict, or output I/O failure; `2` means
+invalid syntax, UUID, format, or option combination; `130` means keyboard
+interruption. Expected failures use fixed private stderr messages, and reads
+and writes are not retried. Failed reads or rendering do not create or replace
+an output file or emit a partial successful stdout document. Unexpected internal
+failures propagate. Once stdout bytes leave the process they cannot be
+retracted, and successful file publication is not rolled back by a later failure.
+
+Export materializes the full transcript and rendered document in memory.
+Individual page queries read current committed data without a shared frozen
+snapshot, so concurrent external changes can affect a multi-page export. Use a
+quiescent source when a stable transcript is required. Export issues no database
+mutations and does not prevent external writes; it is not a point-in-time
+snapshot, streaming export, or global integrity audit.
+
 ## Stateful conversation service
 
 `StatefulConversationService` owns the application-level interaction lifecycle
