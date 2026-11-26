@@ -19,6 +19,7 @@ from tuesday.conversations import (
     SQLiteConversationRepository,
 )
 from tuesday.domain import TuesdayRequest, TuesdayResponse
+from tuesday.history_cli import main as history_main
 from tuesday.language_models import OpenAILanguageModelProvider
 from tuesday.prompting import ConversationalPromptRenderer
 from tuesday.services.conversation import StatefulConversationService
@@ -45,6 +46,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="tuesday",
         description="Submit one request using /chat or /conversation.",
         allow_abbrev=False,
+        epilog="Inspect stored history: tuesday history {list,show} --help",
     )
     parser.add_argument(
         "request",
@@ -169,8 +171,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     Async programmatic callers should use application services directly instead
     of invoking this function inside an already-running event loop.
     """
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "history":
+        return history_main(arguments[1:])
     parser = _parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     if args.interactive:
         if args.request is not None:
             parser.error("--interactive does not accept a positional REQUEST.")

@@ -93,8 +93,7 @@ Invalid arguments are rejected before runtime or database construction.
 The default CLI provides deterministic acknowledgments. Model environment
 configuration alone does not activate a provider or get read by that path;
 `--runtime deterministic` selects it explicitly. There is no guarded tool
-execution, streaming, automatic database activation,
-conversation discovery, or request idempotency
+execution, streaming, automatic database activation, or request idempotency
 guarantee. Programmatic asynchronous callers should use application services
 directly; one-shot execution uses `asyncio.run`, while interactive mode owns an
 `asyncio.Runner`. CLI `main` must not be invoked inside an already-running event loop.
@@ -572,7 +571,149 @@ malformed returned records raise `ConversationRepositoryError` with exception
 chaining. Missing storage is not recreated, malformed records are not skipped,
 and failed queries are not retried. Validation covers the returned page and its
 needed summary fields, not a global audit of every stored record. These are
-programmatic queries; no terminal history commands are introduced here.
+programmatic queries; the terminal commands below use the same read-only reader.
+
+### Conversation history commands
+
+Inspect one page of a caller-selected, existing SQLite database with either
+entry point. Put `history` first, followed by `list` or `show UUID`:
+
+```text
+python -m tuesday history list --database /caller-selected/location/history.sqlite3
+tuesday history list --database /caller-selected/location/history.sqlite3
+python -m tuesday history show 00000000-0000-0000-0000-000000000048 --database /caller-selected/location/history.sqlite3
+tuesday history show 00000000-0000-0000-0000-000000000048 --database /caller-selected/location/history.sqlite3
+```
+
+Every command requires `--database PATH`. There is no default database or fresh
+in-memory store for inspection. `list` takes no positional UUID; `show` requires
+exactly one. A conversational request such as `tuesday "/chat Tell me about
+history"` continues to use the ordinary conversation runtime unchanged.
+
+Both commands accept `--limit N` (default `50`, inclusive range `1–200`),
+`--offset N` (default `0`, inclusive range `0–2**63-1`), and `--json`.
+Abbreviated options and conversation-runtime options (`--runtime`,
+`--interactive`, `--max-history-messages`, `--conversation-id`) are rejected.
+Command syntax, UUIDs, and pagination are validated before reader construction.
+Help needs no database or model configuration:
+
+```text
+tuesday --help
+tuesday history --help
+tuesday history list --help
+tuesday history show --help
+```
+
+Default text output uses labelled blocks separated by one blank line. For
+example, a one-conversation list page can print:
+
+```text
+Conversation: 00000000-0000-0000-0000-000000000048
+Messages: 4
+First appended: 2026-11-26T12:30:45.123456+05:30
+Last appended: 2026-11-26T12:31:00+05:30
+
+Limit: 50
+Offset: 0
+Next offset: None
+```
+
+`show` starts with `Conversation: UUID`, then a blank line and one block per
+returned message. Each message has `Role: VALUE`, `Created at: TIMESTAMP`,
+`Message: UUID`, and `Content:` on separate lines, followed by its full original
+content. Blocks and final pagination metadata are separated by a blank line.
+Original whitespace and embedded newlines are retained, so content can introduce
+additional visible blank lines. All text results end with a terminal newline.
+Empty list pages say `No conversations on this page.`; empty message pages say
+`No messages on this page.` after the conversation UUID. Both include limit,
+offset, and next offset. An empty page at a nonzero offset does not imply that
+the database or conversation has no history.
+
+Use JSON for structured output:
+
+```text
+tuesday history list --database /caller-selected/location/history.sqlite3 --limit 1 --json
+tuesday history show 00000000-0000-0000-0000-000000000048 --database /caller-selected/location/history.sqlite3 --limit 1 --json
+```
+
+Each command emits one JSON object followed by a newline. These examples are
+expanded for readability; actual output occupies one physical line:
+
+```json
+{
+  "items": [
+    {
+      "conversation_id": "00000000-0000-0000-0000-000000000048",
+      "message_count": 4,
+      "first_message_at": "2026-11-26T12:30:45.123456+05:30",
+      "last_message_at": "2026-11-26T12:31:00+05:30"
+    }
+  ],
+  "limit": 1,
+  "offset": 0,
+  "next_offset": null
+}
+```
+
+```json
+{
+  "conversation_id": "00000000-0000-0000-0000-000000000048",
+  "messages": [
+    {
+      "message_id": "00000000-0000-0000-0000-000000000001",
+      "role": "user",
+      "content": "/chat Original content",
+      "created_at": "2026-11-26T12:30:45.123456+05:30"
+    }
+  ],
+  "limit": 1,
+  "offset": 0,
+  "next_offset": 1
+}
+```
+
+UUIDs are strings and timestamps use `isoformat()`. JSON escapes embedded
+newlines and Unicode without changing decoded content. Roles use the persisted
+role values. Original directives, whitespace, duplicate message UUIDs, and reader
+array ordering are preserved. No request/response IDs, generated metadata, or
+transcript-wide message totals are added.
+
+Each invocation issues exactly one query for one page. If `next_offset` is an
+integer, pass it as `--offset` in your next command using the same database,
+conversation UUID when showing messages, and limit. `null` in JSON or `None` in
+text means that page reached the end. Unknown conversation UUIDs and offsets
+beyond the available results succeed with empty pages.
+
+Conversation listing follows first successful append, oldest first; later
+appends do not move a conversation. Messages follow append sequence rather than
+timestamps or UUIDs. First/last appended timestamps may therefore go backwards.
+Separate invocations read current committed data and share no frozen pagination
+snapshot. External writers can change results between invocations.
+
+Commands use `SQLiteConversationHistoryReader` exclusively: path resolution
+does not initialize storage, and queries use worker-owned `mode=ro` connections
+with the existing five-second timeout. Missing files and parent directories are
+not created. Inspection issues no database mutations, schema repairs, or
+message appends. Model environment settings have no effect; no settings loader,
+model, service, orchestrator, or tool is executed. Read-only inspection does not
+prevent concurrent external writers or audit the entire database's integrity.
+
+Successful results go only to stdout, with no stderr diagnostics. Exit statuses
+are `0` for success (including empty pages) or help, `1` for expected database
+path or repository failures, `2` for invalid arguments, and `130` for keyboard
+interruption. Expected errors use fixed stderr messages without raw paths,
+SQL, stored content, or exception details. Queries are not retried, and results
+are fully prepared before stdout is emitted. Unexpected internal errors propagate.
+
+Reuse a listed UUID to continue through the existing conversation commands:
+
+```text
+tuesday --database /caller-selected/location/history.sqlite3 --conversation-id 00000000-0000-0000-0000-000000000048 "/conversation Continue"
+tuesday --interactive --database /caller-selected/location/history.sqlite3 --conversation-id 00000000-0000-0000-0000-000000000048
+```
+
+These commands can append successful turns through the ordinary writable
+conversation runtime. The separate `history` commands only inspect data.
 
 ## Stateful conversation service
 
