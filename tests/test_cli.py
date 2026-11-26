@@ -28,6 +28,52 @@ from tuesday.services.conversation import StatefulConversationService
 CONVERSATION_ID = "00000000-0000-0000-0000-000000000044"
 
 
+@pytest.mark.parametrize("process_argv", [False, True])
+def test_leading_history_dispatch_preserves_arguments(monkeypatch, process_argv):
+    arguments = ["history", "show", CONVERSATION_ID, "--database", "explicit.db"]
+    history = Mock(return_value=130)
+    monkeypatch.setattr(cli, "history_main", history)
+    monkeypatch.setattr(cli, "_parser", Mock(side_effect=AssertionError("No parser")))
+    if process_argv:
+        monkeypatch.setattr(sys, "argv", ["tuesday", *arguments])
+        assert cli.main() == 130
+    else:
+        assert cli.main(tuple(arguments)) == 130
+    history.assert_called_once_with(arguments[1:])
+
+
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        (["/chat Tell me about history"], "TUESDAY received: Tell me about history\n"),
+        (["--json", "/chat history"], None),
+        (["--runtime", "deterministic", "history"], None),
+    ],
+)
+def test_only_a_leading_token_selects_history(monkeypatch, capsys, arguments, expected):
+    history = Mock(side_effect=AssertionError("Not a leading history command"))
+    monkeypatch.setattr(cli, "history_main", history)
+    status = cli.main(arguments)
+    output = capsys.readouterr()
+    if expected is not None:
+        assert status == 0 and output.out == expected and output.err == ""
+    elif "--json" in arguments:
+        assert status == 0
+        assert json.loads(output.out)["content"] == "TUESDAY received: history"
+    else:
+        assert status == 1 and output.out == "" and "explicit /chat" in output.err
+    history.assert_not_called()
+
+
+def test_top_level_help_mentions_history_dispatch(capsys):
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["--help"])
+    assert caught.value.code == 0
+    output = capsys.readouterr()
+    assert "tuesday history {list,show} --help" in output.out
+    assert output.err == ""
+
+
 def stored(path, conversation_id=CONVERSATION_ID):
     context = asyncio.run(
         SQLiteConversationRepository(path).get_context(UUID(conversation_id))
